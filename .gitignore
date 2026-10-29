@@ -18,6 +18,15 @@ data/
 *.wasm
 *.mjs
 
+# Allow pre-trained lightweight ONNX model (<3MB) for plug-and-play CLI & Tosu overlay
+!model.onnx
+!extension/o2jam_level_predictor/model.onnx
+
+# Archives
+*.zip
+*.tar.gz
+*.7z
+
 # OS / IDE
 .vscode/
 .idea/

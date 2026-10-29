@@ -1,0 +1,7 @@
+# Deep Learning & Numerics
+torch>=2.0.0
+numpy>=1.24.0
+
+# ONNX Inference & Export
+onnx>=1.14.0
+onnxruntime>=1.16.0
