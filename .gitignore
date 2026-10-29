@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+.venv/
+
+# Data and Models
+data/
+*.npy
+*.npz
+*.pt
+*.pth
+*.onnx
+
+# OS / IDE
+.vscode/
+.idea/
+*.swp
+Thumbs.db
