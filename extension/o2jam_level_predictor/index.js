@@ -1,6 +1,6 @@
 /**
  * O2Jam 7K Level Predictor - Tosu Static Extension
- * Connects to Tosu WebSocket v2 / v1, parses active .osu file in-browser,
+ * Connects to Tosu WebSocket v2, parses active .osu file in-browser,
  * and runs model.onnx via ONNX Runtime Web.
  */
 
@@ -10,8 +10,6 @@ let isPredicting = false;
 
 // DOM Elements
 const levelDisplay = document.getElementById("level-display");
-const titleDisplay = document.getElementById("title-display");
-const diffDisplay = document.getElementById("diff-display");
 const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
 
@@ -27,7 +25,7 @@ function getHost() {
 
 // ── 1. ONNX Runtime Initialization ──────────────────────────────────────────
 async function initONNX() {
-  updateStatus("Loading ONNX model...", "loading");
+  updateStatus("Loading model...", "loading");
   try {
     if (typeof ort !== "undefined") {
       ort.env.wasm.wasmPaths = "./";
@@ -39,10 +37,10 @@ async function initONNX() {
       executionProviders: ["wasm"],
     });
 
-    updateStatus("Model ready. Waiting for Tosu...", "idle");
+    updateStatus("Ready. Waiting for map...", "idle");
   } catch (err) {
     console.error("[O2Jam Predictor] Failed to load ONNX model:", err);
-    updateStatus(`Model error: ${err.message}`, "warning");
+    updateStatus(`Model error`, "warning");
   }
 }
 
@@ -51,8 +49,6 @@ function parseOsuBeatmap(osuText) {
   const lines = osuText.split(/\r?\n/);
   let mode = null;
   let circleSize = null;
-  let title = "";
-  let version = "";
   let isHitObjects = false;
   const notes = [];
 
@@ -72,8 +68,6 @@ function parseOsuBeatmap(osuText) {
         const val = line.slice(colonIdx + 1).trim();
         if (key === "Mode") mode = val;
         else if (key === "CircleSize") circleSize = val;
-        else if (key === "Title") title = val;
-        else if (key === "Version") version = val;
       }
     } else {
       if (line.startsWith("[")) break;
@@ -99,15 +93,12 @@ function parseOsuBeatmap(osuText) {
   if (!is7KMania) {
     return {
       is7KMania: false,
-      mode: mode ?? "0",
       circleSize: csNum || circleSize || "?",
-      title: title || "Unknown",
-      version: version || "",
     };
   }
 
   if (notes.length < 5) {
-    return { is7KMania: true, error: "Too few notes (< 5)", title, version };
+    return { is7KMania: true, error: "Too few notes (< 5)" };
   }
 
   notes.sort((a, b) => a.startT - b.startT || a.endT - b.endT);
@@ -147,8 +138,6 @@ function parseOsuBeatmap(osuText) {
     is7KMania: true,
     grid,
     tFrames,
-    title,
-    version,
     noteCount: notes.length,
     durationMs,
   };
@@ -173,30 +162,24 @@ async function fetchActiveBeatmap() {
   const endpoint = `http://${host}/files/beatmap/file?_=${Date.now()}`;
   const resp = await fetch(endpoint, { cache: "no-store" });
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status} fetching beatmap file`);
+    throw new Error(`HTTP ${resp.status}`);
   }
   return await resp.text();
 }
 
 // ── 5. Main Recompute Handler ───────────────────────────────────────────────
-async function processCurrentBeatmap(metaHint) {
+async function processCurrentBeatmap() {
   if (isPredicting) return;
   isPredicting = true;
-  updateStatus("Reading map file...", "warning");
+  updateStatus("Reading map...", "loading");
 
   try {
     const osuText = await fetchActiveBeatmap();
     const parsed = parseOsuBeatmap(osuText);
 
-    const title = parsed.title || metaHint?.title || "Unknown Title";
-    const diff = parsed.version || metaHint?.version || "";
-
-    titleDisplay.textContent = title;
-    diffDisplay.textContent = diff || "7K Mania";
-
     if (!parsed.is7KMania) {
       levelDisplay.textContent = "--";
-      updateStatus(`Non-7K (${parsed.circleSize}K / Mode ${parsed.mode})`, "idle");
+      updateStatus(`Non-7K (${parsed.circleSize}K)`, "idle");
       return;
     }
 
@@ -206,7 +189,7 @@ async function processCurrentBeatmap(metaHint) {
       return;
     }
 
-    updateStatus("Predicting level...", "warning");
+    updateStatus("Predicting...", "loading");
     const predResult = await runPrediction(parsed);
 
     if (predResult) {
@@ -216,18 +199,18 @@ async function processCurrentBeatmap(metaHint) {
       void levelDisplay.offsetWidth;
       levelDisplay.classList.add("pulse");
 
-      updateStatus(`7K Mania (${predResult.latencyMs}ms)`, "");
+      updateStatus(`7K (${predResult.latencyMs}ms)`, "");
       console.log(`[O2Jam Predictor] Predicted Level: ${predResult.level.toFixed(2)} (Round: ${roundedLevel})`);
     }
   } catch (err) {
     console.error("[O2Jam Predictor] Error processing beatmap:", err);
-    updateStatus(`Error: ${err.message}`, "warning");
+    updateStatus("Error reading map", "warning");
   } finally {
     isPredicting = false;
   }
 }
 
-// ── 6. Tosu WebSocket Connections (v2 + legacy fallback) ─────────────────────
+// ── 6. Tosu WebSocket Connections ───────────────────────────────────────────
 function connectToTosu() {
   const host = getHost();
   const counterPath = window.COUNTER_PATH || window.location.pathname.replace(/^\/|\/$/g, "");
@@ -237,7 +220,7 @@ function connectToTosu() {
   const ws = new WebSocket(v2Url);
 
   ws.onopen = () => {
-    updateStatus("Connected to Tosu v2", "idle");
+    updateStatus("Connected to Tosu", "idle");
   };
 
   ws.onmessage = (event) => {
@@ -245,7 +228,6 @@ function connectToTosu() {
       const data = JSON.parse(event.data);
       if (data?.error || data?.message?.error) return;
 
-      // Detect beatmap identity in v2 payload
       const bm = data?.beatmap;
       if (!bm) return;
 
@@ -259,16 +241,15 @@ function connectToTosu() {
         return;
       }
 
-      console.log(`[O2Jam Predictor] Beatmap change detected: ${title} [${version}] (${mapKey})`);
       lastBeatmapId = mapKey;
-      processCurrentBeatmap({ title, version });
+      processCurrentBeatmap();
     } catch (err) {
       console.error("[O2Jam Predictor] Error handling WS message:", err);
     }
   };
 
   ws.onclose = () => {
-    updateStatus("Tosu disconnected. Retrying...", "warning");
+    updateStatus("Tosu disconnected", "warning");
     setTimeout(connectToTosu, 1500);
   };
 

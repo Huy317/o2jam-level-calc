@@ -1,6 +1,6 @@
 Name: O2Jam 7K Level Predictor
 Author: Antigravity
-Version: 1.0.0
+Version: 1.1.0
 Usecase: Ingame Overlay, OBS Overlay
 CompatibleWith: Tosu
-Resolution: 260x90
+Resolution: 170x65
