@@ -27,19 +27,22 @@ Predict human-assigned O2Jam difficulty "Level" (ranging ~1 to 180+) of 7-key os
     - `[O2Jam] [H]`: 671 charts (Hard difficulty)
     - `[O2Jam] [E]`: 577 charts (Easy difficulty)
     - `[O2Jam] [N]`: 429 charts (Normal difficulty)
-    - `[O2Jam] [D]`: 365 charts (Draft/Dan difficulty)
-  - **HitObjects & Deduplication Preview:**
-    - All charts have >= 20 notes (range: 315 to 12,243 notes, average: ~3,384 notes).
-    - Exactly 89 duplicate charts identified by MD5 note hash, leaving **2,557 unique charts** for the final dataset. Modern `[O2EZ]` tags take precedence in deduplication.
+    - `[O2Jam] [D]`: 365 charts (Super Hard difficulty, [D] = SH)
+  - **HitObjects & Deduplication Details:**
+    - All charts contain >= 20 notes (range: 315 to 12,243 notes, average: ~3,384 notes).
+    - Exactly **89 duplicate groups** detected by MD5 note hash (2,557 unique charts total).
+    - In all 89 groups, duplicates are strictly between an **`[O2EZ]`** chart and a **DMJAM** chart (`[E]`, `[N]`, `[H]`, or `[D]`). Zero duplicates exist within the same family.
+    - **63 pairs** share the exact same level.
+    - **26 pairs** have differing level ratings between O2EZ and DMJAM (e.g. Mopemope 137 vs 154, Red Goose 135 vs 140, Viva Happy 54 vs 47). Awaiting user verdict on prioritization.
 
 ---
 
 ### Next Steps
 - [ ] **Step 2: Build Dataset (`step2_build_dataset.py`)**
+  - Finalize duplicate resolution based on user priority feedback (O2EZ vs DMJAM).
   - Convert charts to `(T, 7)` uint8 grids at `STEP_MS = 20` (50 FPS).
   - Categorical encoding: `0` (Empty), `1` (Tap), `2` (LN Head), `3` (LN Body), `4` (LN Tail).
-  - Deduplicate with priority for modern `[O2EZ]` tags.
-  - Save dataset in an efficient format (e.g. `.npz` or memory-mapped files) with metadata index.
+  - Save dataset in fast-loading compressed format (`o2jam_dataset.npz` with metadata index).
 - [ ] **Step 3: Model Architecture & Training (`step3_train.py`)**
   - 1D-CNN with Conv1d residual blocks, dilations (1, 2, 4), and Attention / Top-K Pooling.
   - Data augmentation (horizontal mirror 50%).
