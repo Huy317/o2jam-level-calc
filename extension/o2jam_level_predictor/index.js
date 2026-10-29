@@ -1,10 +1,11 @@
 /**
  * O2Jam 7K Level Predictor - Tosu Static Extension
- * Directly runs model.onnx via ONNX Runtime Web in the browser/overlay sandbox.
+ * Connects to Tosu WebSocket v2 / v1, parses active .osu file in-browser,
+ * and runs model.onnx via ONNX Runtime Web.
  */
 
 let ortSession = null;
-let currentMapIdentifier = null;
+let lastBeatmapId = null;
 let isPredicting = false;
 
 // DOM Elements
@@ -13,66 +14,103 @@ const titleDisplay = document.getElementById("title-display");
 const diffDisplay = document.getElementById("diff-display");
 const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
-const overlayContainer = document.getElementById("overlay-container");
 
-// Initialize ONNX Runtime Session
+function updateStatus(text, dotClass = "idle") {
+  if (statusText) statusText.textContent = text;
+  if (statusDot) statusDot.className = `status-dot ${dotClass}`.trim();
+  console.log(`[O2Jam Predictor] ${text}`);
+}
+
+function getHost() {
+  return window.location.host || "127.0.0.1:24050";
+}
+
+// ── 1. ONNX Runtime Initialization ──────────────────────────────────────────
 async function initONNX() {
+  updateStatus("Loading ONNX model...", "loading");
   try {
-    statusText.textContent = "Loading ONNX model...";
-    // Configure WASM paths and threading
     if (typeof ort !== "undefined") {
       ort.env.wasm.wasmPaths = "./";
       ort.env.wasm.numThreads = 1;
       ort.env.wasm.simd = true;
     }
+
     ortSession = await ort.InferenceSession.create("./model.onnx", {
       executionProviders: ["wasm"],
     });
-    statusText.textContent = "Model loaded. Ready.";
-    statusDot.className = "status-dot idle";
-    console.log("[O2Jam Predictor] ONNX model initialized successfully.");
+
+    updateStatus("Model ready. Waiting for Tosu...", "idle");
   } catch (err) {
     console.error("[O2Jam Predictor] Failed to load ONNX model:", err);
-    statusText.textContent = "ONNX load error";
-    statusDot.className = "status-dot warning";
+    updateStatus(`Model error: ${err.message}`, "warning");
   }
 }
 
-// Parse raw .osu beatmap text into a 20ms (T, 7) Uint8 discrete grid
-function parseBeatmapToGrid(osuText) {
+// ── 2. Parse .osu Text & Build Discrete (T, 7) Grid ─────────────────────────
+function parseOsuBeatmap(osuText) {
   const lines = osuText.split(/\r?\n/);
+  let mode = null;
+  let circleSize = null;
+  let title = "";
+  let version = "";
   let isHitObjects = false;
   const notes = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
+    if (!line) continue;
+
     if (line === "[HitObjects]") {
       isHitObjects = true;
       continue;
     }
-    if (!isHitObjects) continue;
-    if (!line || line.startsWith("[")) break;
 
-    const parts = line.split(",");
-    if (parts.length >= 4) {
-      const x = parseInt(parts[0], 10);
-      const t = parseInt(parts[2], 10);
-      const nType = parseInt(parts[3], 10);
-      const col = Math.min(Math.max(Math.floor((x * 7) / 512), 0), 6);
-      let endT = t;
-      if (nType & 128 && parts.length > 5) {
-        const lnEnd = parseInt(parts[5].split(":")[0], 10);
-        if (!isNaN(lnEnd)) endT = lnEnd;
+    if (!isHitObjects) {
+      if (line.startsWith("Mode:")) {
+        mode = line.split(":", 1)[1].trim();
+      } else if (line.startsWith("CircleSize:")) {
+        circleSize = line.split(":", 1)[1].trim();
+      } else if (line.startsWith("Title:")) {
+        title = line.split(":", 1)[1].trim();
+      } else if (line.startsWith("Version:")) {
+        version = line.split(":", 1)[1].trim();
       }
-      notes.push({ startT: t, endT: endT, col: col });
+    } else {
+      if (line.startsWith("[")) break;
+      const parts = line.split(",");
+      if (parts.length >= 4) {
+        const x = parseInt(parts[0], 10);
+        const t = parseInt(parts[2], 10);
+        const nType = parseInt(parts[3], 10);
+        const col = Math.min(Math.max(Math.floor((x * 7) / 512), 0), 6);
+        let endT = t;
+        if (nType & 128 && parts.length > 5) {
+          const lnEnd = parseInt(parts[5].split(":")[0], 10);
+          if (!isNaN(lnEnd)) endT = lnEnd;
+        }
+        notes.push({ startT: t, endT: endT, col: col });
+      }
     }
   }
 
-  if (notes.length < 5) return null;
+  const csNum = parseInt(circleSize, 10);
+  const is7KMania = (mode === "3" || mode === 3) && csNum === 7;
 
-  // Sort notes by start timestamp
+  if (!is7KMania) {
+    return {
+      is7KMania: false,
+      mode: mode ?? "0",
+      circleSize: csNum || circleSize || "?",
+      title: title || "Unknown",
+      version: version || "",
+    };
+  }
+
+  if (notes.length < 5) {
+    return { is7KMania: true, error: "Too few notes (< 5)", title, version };
+  }
+
   notes.sort((a, b) => a.startT - b.startT || a.endT - b.endT);
-
   const firstT = notes[0].startT;
   let maxEndT = firstT;
   for (let i = 0; i < notes.length; i++) {
@@ -82,12 +120,9 @@ function parseBeatmapToGrid(osuText) {
   const durationMs = Math.max(0, maxEndT - firstT);
   const stepMs = 20;
   let tFrames = Math.floor(durationMs / stepMs) + 1;
-  const maxFramesCap = 25000;
-  tFrames = Math.min(tFrames, maxFramesCap);
+  tFrames = Math.min(tFrames, 25000);
 
-  // Flat (T * 7) uint8 buffer
   const grid = new Uint8Array(tFrames * 7);
-
   for (let i = 0; i < notes.length; i++) {
     const note = notes[i];
     const startFrame = Math.floor((note.startT - firstT) / stepMs);
@@ -95,85 +130,146 @@ function parseBeatmapToGrid(osuText) {
 
     if (startFrame >= tFrames) continue;
     endFrame = Math.min(endFrame, tFrames - 1);
-
     const col = note.col;
 
     if (endFrame <= startFrame) {
-      grid[startFrame * 7 + col] = 1; // Tap note
+      grid[startFrame * 7 + col] = 1;
     } else {
-      grid[startFrame * 7 + col] = 2; // LN Head
+      grid[startFrame * 7 + col] = 2;
       for (let f = startFrame + 1; f < endFrame; f++) {
-        grid[f * 7 + col] = 3; // LN Body
+        grid[f * 7 + col] = 3;
       }
-      grid[endFrame * 7 + col] = 4; // LN Tail
+      grid[endFrame * 7 + col] = 4;
     }
   }
 
-  return { grid, tFrames, noteCount: notes.length };
+  return {
+    is7KMania: true,
+    grid,
+    tFrames,
+    title,
+    version,
+    noteCount: notes.length,
+    durationMs,
+  };
 }
 
-// Execute ONNX model inference
-async function predictLevel(parsedData) {
-  if (!ortSession || !parsedData) return null;
+// ── 3. ONNX Model Inference ─────────────────────────────────────────────────
+async function runPrediction(parsed) {
+  if (!ortSession || !parsed.grid) return null;
 
-  const { grid, tFrames } = parsedData;
-  const tensor = new ort.Tensor("uint8", grid, [1, tFrames, 7]);
-
+  const tensor = new ort.Tensor("uint8", parsed.grid, [1, parsed.tFrames, 7]);
   const t0 = performance.now();
   const results = await ortSession.run({ note_grid: tensor });
   const latencyMs = (performance.now() - t0).toFixed(1);
 
-  const predLevel = results.predicted_level.data[0];
-  return { level: predLevel, latencyMs };
+  const level = results.predicted_level.data[0];
+  return { level, latencyMs };
 }
 
-// Fetch raw .osu file content from Tosu API
-async function fetchCurrentBeatmapFile() {
-  const url = `http://127.0.0.1:24050/files/beatmap/file?t=${Date.now()}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: Failed to fetch beatmap file`);
+// ── 4. Fetch Active Beatmap from Tosu ────────────────────────────────────────
+async function fetchActiveBeatmap() {
+  const host = getHost();
+  const endpoint = `http://${host}/files/beatmap/file?_=${Date.now()}`;
+  const resp = await fetch(endpoint, { cache: "no-store" });
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status} fetching beatmap file`);
   }
-  return await response.text();
+  return await resp.text();
 }
 
-// Update UI with predicted level
-function displayResult(level, latencyMs, title, diff) {
-  levelDisplay.textContent = Math.round(level);
-  levelDisplay.classList.remove("pulse");
-  void levelDisplay.offsetWidth; // Trigger reflow for animation
-  levelDisplay.classList.add("pulse");
+// ── 5. Main Recompute Handler ───────────────────────────────────────────────
+async function processCurrentBeatmap(metaHint) {
+  if (isPredicting) return;
+  isPredicting = true;
+  updateStatus("Reading map file...", "warning");
 
-  titleDisplay.textContent = title || "Unknown Title";
-  diffDisplay.textContent = diff || "7K Mania";
-  statusText.textContent = `7K Mania (${latencyMs}ms)`;
-  statusDot.className = "status-dot";
+  try {
+    const osuText = await fetchActiveBeatmap();
+    const parsed = parseOsuBeatmap(osuText);
+
+    const title = parsed.title || metaHint?.title || "Unknown Title";
+    const diff = parsed.version || metaHint?.version || "";
+
+    titleDisplay.textContent = title;
+    diffDisplay.textContent = diff || "7K Mania";
+
+    if (!parsed.is7KMania) {
+      levelDisplay.textContent = "--";
+      updateStatus(`Non-7K (${parsed.circleSize}K / Mode ${parsed.mode})`, "idle");
+      return;
+    }
+
+    if (parsed.error) {
+      levelDisplay.textContent = "--";
+      updateStatus(parsed.error, "warning");
+      return;
+    }
+
+    updateStatus("Predicting level...", "warning");
+    const predResult = await runPrediction(parsed);
+
+    if (predResult) {
+      const roundedLevel = Math.round(predResult.level);
+      levelDisplay.textContent = roundedLevel;
+      levelDisplay.classList.remove("pulse");
+      void levelDisplay.offsetWidth;
+      levelDisplay.classList.add("pulse");
+
+      updateStatus(`7K Mania (${predResult.latencyMs}ms)`, "");
+      console.log(`[O2Jam Predictor] Predicted Level: ${predResult.level.toFixed(2)} (Round: ${roundedLevel})`);
+    }
+  } catch (err) {
+    console.error("[O2Jam Predictor] Error processing beatmap:", err);
+    updateStatus(`Error: ${err.message}`, "warning");
+  } finally {
+    isPredicting = false;
+  }
 }
 
-// Connect to Tosu WebSocket
-function connectWebSocket() {
-  const wsUrl = "ws://127.0.0.1:24050/ws";
-  const ws = new WebSocket(wsUrl);
+// ── 6. Tosu WebSocket Connections (v2 + legacy fallback) ─────────────────────
+function connectToTosu() {
+  const host = getHost();
+  const counterPath = window.COUNTER_PATH || window.location.pathname.replace(/^\/|\/$/g, "");
+  const v2Url = `ws://${host}/websocket/v2?l=${encodeURI(counterPath)}`;
+
+  console.log(`[O2Jam Predictor] Connecting to Tosu WebSocket: ${v2Url}`);
+  const ws = new WebSocket(v2Url);
 
   ws.onopen = () => {
-    statusText.textContent = "Connected to Tosu";
-    statusDot.className = "status-dot idle";
-    console.log("[O2Jam Predictor] WebSocket connected to Tosu.");
+    updateStatus("Connected to Tosu v2", "idle");
   };
 
-  ws.onmessage = async (event) => {
+  ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      handleGameData(data);
+      if (data?.error || data?.message?.error) return;
+
+      // Detect beatmap identity in v2 payload
+      const bm = data?.beatmap;
+      if (!bm) return;
+
+      const md5 = (bm?.checksum || bm?.md5 || "").toLowerCase();
+      const id = bm?.id || 0;
+      const title = bm?.title || "";
+      const version = bm?.version || "";
+      const mapKey = md5 ? `hash:${md5}` : `id:${id}|${title}:${version}`;
+
+      if (!mapKey || mapKey === lastBeatmapId) {
+        return;
+      }
+
+      console.log(`[O2Jam Predictor] Beatmap change detected: ${title} [${version}] (${mapKey})`);
+      lastBeatmapId = mapKey;
+      processCurrentBeatmap({ title, version });
     } catch (err) {
-      console.error("[O2Jam Predictor] Error parsing WS data:", err);
+      console.error("[O2Jam Predictor] Error handling WS message:", err);
     }
   };
 
   ws.onclose = () => {
-    statusText.textContent = "Disconnected (Retrying...)";
-    statusDot.className = "status-dot warning";
-    setTimeout(connectWebSocket, 2000);
+    updateStatus("Tosu disconnected. Retrying...", "warning");
+    setTimeout(connectToTosu, 1500);
   };
 
   ws.onerror = () => {
@@ -181,68 +277,10 @@ function connectWebSocket() {
   };
 }
 
-// Process beatmap updates from Tosu
-async function handleGameData(data) {
-  // Gosumemory / Tosu format inspection
-  const bm = data?.menu?.bm || data?.beatmap;
-  if (!bm) return;
-
-  const mode = data?.menu?.bm?.stats?.mode ?? data?.gameplay?.gameMode ?? 3;
-  const cs = data?.menu?.bm?.stats?.CS ?? data?.beatmap?.stats?.circleSize ?? 7;
-  const title = bm?.metadata?.title || bm?.title || "Unknown Title";
-  const diff = bm?.metadata?.difficulty || bm?.version || "";
-  const mapId = bm?.id || bm?.path?.file || `${title}_${diff}`;
-
-  // Check 7K Mania condition
-  const is7KMania = (mode === 3 || mode === "mania") && Math.round(cs) === 7;
-
-  if (!is7KMania) {
-    if (currentMapIdentifier !== "non_7k") {
-      currentMapIdentifier = "non_7k";
-      levelDisplay.textContent = "--";
-      titleDisplay.textContent = title;
-      diffDisplay.textContent = `${cs}K / Non-7K`;
-      statusText.textContent = "Waiting for 7K map...";
-      statusDot.className = "status-dot idle";
-    }
-    return;
-  }
-
-  // Detect map change
-  if (currentMapIdentifier === mapId || isPredicting) {
-    return;
-  }
-
-  currentMapIdentifier = mapId;
-  isPredicting = true;
-  statusText.textContent = "Predicting level...";
-  statusDot.className = "status-dot warning";
-
-  try {
-    const osuContent = await fetchCurrentBeatmapFile();
-    const parsed = parseBeatmapToGrid(osuContent);
-
-    if (parsed) {
-      const result = await predictLevel(parsed);
-      if (result) {
-        displayResult(result.level, result.latencyMs, title, diff);
-      }
-    } else {
-      statusText.textContent = "Parse failed (< 5 notes)";
-    }
-  } catch (err) {
-    console.error("[O2Jam Predictor] Error during prediction:", err);
-    statusText.textContent = "Error fetching map";
-    statusDot.className = "status-dot warning";
-  } finally {
-    isPredicting = false;
-  }
-}
-
-// Start application
-async function start() {
+// Start
+async function main() {
   await initONNX();
-  connectWebSocket();
+  connectToTosu();
 }
 
-start();
+main();
