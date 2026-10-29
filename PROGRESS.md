@@ -91,3 +91,19 @@ Predict human-assigned O2Jam difficulty "Level" (ranging ~1 to 180+) of 7-key os
   - **Inference Latencies (Full 2.5-minute song, 7,500 frames):**
     - **GPU (RTX 4070 SUPER):** **1.23 ms** (8x faster than the <10ms requirement)
     - **CPU (ONNX Runtime):** **4.55 ms** (30s window), **7.89 ms** (60s window), **20.23 ms** (full 2.5-minute song)
+
+---
+
+### Step 4: Tosu Extension & Real-time Integration (`extension/o2jam_level_predictor`)
+- **Status:** Completed & Deployed
+- **Workspace Source:** [`extension/o2jam_level_predictor`](file:///d:/Projects/o2jam-level-calc/extension/o2jam_level_predictor)
+- **Deployed Target:** `C:\Users\Admin\Desktop\Apps\OsuRelated\tosu\static\o2jam_level_predictor`
+- **Features:**
+  - Pure JavaScript / WebAssembly execution using `onnxruntime-web` (`ort.min.js`). Zero Python server required.
+  - Connects to Tosu WebSocket (`ws://127.0.0.1:24050/ws`).
+  - Detects 7K Mania beatmaps (`mode == 3` and `CS == 7`).
+  - Fetches raw `.osu` beatmap from `http://127.0.0.1:24050/files/beatmap/file`.
+  - Parses hit objects directly into discrete 20ms `(1, T, 7)` uint8 tensor in browser memory.
+  - Evaluates `model.onnx` and renders animated O2Jam Level badge with song title and latency indicator.
+  - Tosu dashboard compatible with `metadata.txt` and `settings.json`.
+- **CLI Predictor Tool:** [`predict.py`](file:///d:/Projects/o2jam-level-calc/predict.py) for testing any `.osu` file directly from terminal in ~30ms.

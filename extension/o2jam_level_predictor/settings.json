@@ -1,0 +1,22 @@
+{
+  "general": {
+    "showTitle": {
+      "type": "boolean",
+      "label": "Show Song Title",
+      "value": true
+    },
+    "showDecimal": {
+      "type": "boolean",
+      "label": "Show Decimal Precision (e.g. Lv. 94.2)",
+      "value": false
+    },
+    "badgeScale": {
+      "type": "number",
+      "label": "Overlay Scale",
+      "value": 1.0,
+      "min": 0.5,
+      "max": 2.0,
+      "step": 0.1
+    }
+  }
+}

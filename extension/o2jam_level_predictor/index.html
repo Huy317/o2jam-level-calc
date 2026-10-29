@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>O2Jam 7K Level Predictor Overlay</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- ONNX Runtime Web: Local offline bundle with CDN fallback -->
+  <script src="./ort.min.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js';"></script>
+</head>
+<body>
+  <div id="overlay-container">
+    <div id="level-badge">
+      <span class="level-prefix">O2JAM</span>
+      <span class="level-value" id="level-display">--</span>
+    </div>
+    <div id="info-container">
+      <div class="map-title" id="title-display">Waiting for beatmap...</div>
+      <div class="map-diff" id="diff-display">7K Mania Predictor</div>
+      <div class="status-tag">
+        <span class="status-dot idle" id="status-dot"></span>
+        <span id="status-text">Connecting to Tosu...</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="index.js"></script>
+</body>
+</html>
