@@ -15,6 +15,8 @@ data/
 *.pt
 *.pth
 *.onnx
+*.wasm
+*.mjs
 
 # OS / IDE
 .vscode/

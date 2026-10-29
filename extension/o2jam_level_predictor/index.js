@@ -19,9 +19,10 @@ const overlayContainer = document.getElementById("overlay-container");
 async function initONNX() {
   try {
     statusText.textContent = "Loading ONNX model...";
-    // Configure WASM paths if needed
+    // Configure WASM paths and threading
     if (typeof ort !== "undefined") {
-      ort.env.wasm.numThreads = 2;
+      ort.env.wasm.wasmPaths = "./";
+      ort.env.wasm.numThreads = 1;
       ort.env.wasm.simd = true;
     }
     ortSession = await ort.InferenceSession.create("./model.onnx", {
