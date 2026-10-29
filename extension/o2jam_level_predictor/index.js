@@ -66,14 +66,14 @@ function parseOsuBeatmap(osuText) {
     }
 
     if (!isHitObjects) {
-      if (line.startsWith("Mode:")) {
-        mode = line.split(":", 1)[1].trim();
-      } else if (line.startsWith("CircleSize:")) {
-        circleSize = line.split(":", 1)[1].trim();
-      } else if (line.startsWith("Title:")) {
-        title = line.split(":", 1)[1].trim();
-      } else if (line.startsWith("Version:")) {
-        version = line.split(":", 1)[1].trim();
+      const colonIdx = line.indexOf(":");
+      if (colonIdx !== -1) {
+        const key = line.slice(0, colonIdx).trim();
+        const val = line.slice(colonIdx + 1).trim();
+        if (key === "Mode") mode = val;
+        else if (key === "CircleSize") circleSize = val;
+        else if (key === "Title") title = val;
+        else if (key === "Version") version = val;
       }
     } else {
       if (line.startsWith("[")) break;
