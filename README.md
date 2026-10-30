@@ -12,7 +12,7 @@ An end-to-end machine learning pipeline that predicts the human-assigned **O2Jam
 
 ## Features
 
-- **Accurate Difficulty Estimation:** Trained on 2,557 unique O2Jam 7K charts across official and community releases (DMJAM / O2EZ) with a median prediction error $\le 4.25$ levels ($R = 0.972$).
+- **Accurate Difficulty Estimation:** Trained on 4,055 unique O2Jam 7K charts across official and community releases (DMJAM, NSJAM, O2EZ) with a median prediction error $\le 3.88$ levels ($R = 0.967$).
 - **Sub-15ms Real-Time Inference:** Operates on variable-length charts in milliseconds without needing to trim or pad.
 - **Zero Python Runtime for Players:** The tosu! extension runs 100% inside your browser or OBS via WebAssembly — no Python, PyTorch, or GPU setup needed for end users.
 - **Standalone CLI:** Test any `.osu` file from your command line in ~30ms.

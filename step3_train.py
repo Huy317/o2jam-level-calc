@@ -1,16 +1,17 @@
 """
-Step 3: Train O2Jam 7K Level Predictor (v2 Architecture) and Export to ONNX.
-Features:
+Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,055 charts).
+Architecture:
   - 37 input channels (35 one-hot states + 1 chord attack count + 1 hold count)
   - 6 Residual Conv1D blocks (dilations 1, 2, 4, 8, 16, 32) -> ~5.06s receptive field
   - Multi-scale temporal pooling (1s micro-burst, 5s phrase, 15s climax, global average stamina, attention)
   - Smooth sigmoid bounded output [15.0, 185.0]
-  - Tier-weighted Huber loss
+  - Tier-weighted + Asymmetric Huber loss
 """
 
 import json
 import os
 import random
+import shutil
 import sys
 import time
 import numpy as np
@@ -26,6 +27,7 @@ DATASET_PATH = os.path.join("data", "o2jam_dataset.npz")
 METADATA_PATH = os.path.join("data", "dataset_metadata.json")
 CHECKPOINT_PATH = "best_model.pt"
 ONNX_PATH = "model.onnx"
+EXTENSION_ONNX = os.path.join("extension", "o2jam_level_predictor", "model.onnx")
 
 SEED = 42
 BATCH_SIZE = 16
@@ -155,15 +157,10 @@ class O2JamLevelPredictor(nn.Module):
         feat = self.block6(feat)
 
         # Multi-scale temporal pooling:
-        # tau_1 = 1s (50 frames): peak micro-burst
         p1 = F.avg_pool1d(feat, kernel_size=50, stride=10, padding=25).amax(dim=-1)
-        # tau_2 = 5s (250 frames): phrase difficulty
         p5 = F.avg_pool1d(feat, kernel_size=250, stride=25, padding=125).amax(dim=-1)
-        # tau_3 = 15s (750 frames): sustained climax density
         p15 = F.avg_pool1d(feat, kernel_size=750, stride=50, padding=375).amax(dim=-1)
-        # Global Average Pooling: overall song stamina
         gap = feat.mean(dim=-1)
-        # Attention Pooling: learned salient section weight
         attn_w = torch.softmax(self.attn_conv(feat), dim=-1)
         attn_pool = (feat * attn_w).sum(dim=-1)
 
@@ -207,14 +204,14 @@ def train():
     lengths = data["lengths"]
     levels = data["levels"]
     n_charts = len(levels)
-    print(f"Loaded dataset: {n_charts} charts")
+    print(f"Loaded dataset: {n_charts:,} charts")
 
     indices = list(range(n_charts))
     random.shuffle(indices)
     split_idx = int(n_charts * (1.0 - VAL_SPLIT))
     train_indices = indices[:split_idx]
     val_indices = indices[split_idx:]
-    print(f"Train set: {len(train_indices)} charts | Validation set: {len(val_indices)} charts")
+    print(f"Train set: {len(train_indices):,} charts | Validation set: {len(val_indices):,} charts")
 
     train_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, train_indices, augment=True)
     val_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, val_indices, augment=False)
@@ -244,12 +241,13 @@ def train():
 
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 pred = model(x)
-                # Tier-weighted Huber loss: upweight high-tier charts (>110)
-                weights = torch.ones_like(y)
-                weights = torch.where(y > 110, 1.8, weights)
-                weights = torch.where(y > 140, 2.2, weights)
+                # Tier-weighted + Asymmetric Huber loss: prevents negative bias on elite stamina charts
+                tier_weights = torch.ones_like(y)
+                tier_weights = torch.where(y > 110, 1.8, tier_weights)
+                tier_weights = torch.where(y > 140, 2.2, tier_weights)
+                asym_weights = torch.where((pred < y) & (y > 100), 1.5, 1.0)
                 loss_elements = F.smooth_l1_loss(pred, y, reduction="none", beta=1.0)
-                loss = (weights * loss_elements).mean()
+                loss = (tier_weights * asym_weights * loss_elements).mean()
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -307,6 +305,8 @@ def train():
         }
     )
     print(f"Saved {ONNX_PATH} ({os.path.getsize(ONNX_PATH) / 1048576:.2f} MB)")
+    shutil.copyfile(ONNX_PATH, EXTENSION_ONNX)
+    print(f"Updated extension copy at {EXTENSION_ONNX}")
 
 
 if __name__ == "__main__":
