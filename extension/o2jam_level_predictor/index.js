@@ -1,40 +1,20 @@
 /**
  * O2Jam 7K Level Predictor - Tosu Static Extension
  * Connects to Tosu WebSocket v2, parses active .osu file in-browser,
- * supports HT/DT/custom playback rate scaling, runs model.onnx via ONNX Runtime Web,
- * and manages user level feedback with Tosu disk settings persistence.
+ * supports HT/DT/custom playback rate scaling, and runs model.onnx via ONNX Runtime Web.
  */
 
 let ortSession = null;
 let lastProcessedKey = null;
 let isPredicting = false;
-
-// Active Beatmap Metadata & State
-const currentMap = {
-  md5: "",
-  beatmap_id: 0,
-  beatmapset_id: 0,
-  title: "",
-  artist: "",
-  version: "",
-  creator: "",
-  predictedLevel: null,
-  rate: 1.0,
-  modText: "",
-  noteCount: 0,
-};
-
-// Persistent Suggestions Store (key -> record)
-const suggestionsStore = new Map();
+let currentRate = 1.0;
+let currentModText = "";
 
 // DOM Elements
 const levelDisplay = document.getElementById("level-display");
 const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
 const rateBadge = document.getElementById("rate-badge");
-const feedbackForm = document.getElementById("feedback-form");
-const suggestInput = document.getElementById("suggest-input");
-const suggestBtn = document.getElementById("suggest-btn");
 
 function updateStatus(text, dotClass = "idle") {
   if (statusText) statusText.textContent = text;
@@ -245,112 +225,7 @@ function extractRateAndMods(data) {
   return { rate: 1.0, modText: "" };
 }
 
-// ── 6. Persistence: Tosu Settings API + LocalStorage ────────────────────────
-function getSuggestionKey(md5, rate) {
-  if (!md5) return "";
-  const r = Number(rate) || 1.0;
-  return Math.abs(r - 1.0) < 0.01 ? md5 : `${md5}@${r.toFixed(2)}`;
-}
-
-async function loadStoredSuggestions() {
-  // 1. Load from localStorage first (instant)
-  try {
-    const local = localStorage.getItem("o2jam_user_suggestions");
-    if (local) {
-      const parsed = JSON.parse(local);
-      for (const [k, v] of Object.entries(parsed)) {
-        suggestionsStore.set(k, v);
-      }
-    }
-  } catch (e) {
-    console.warn("[O2Jam Predictor] LocalStorage load error:", e);
-  }
-
-  // 2. Load from Tosu settings endpoint
-  try {
-    const folder = getCounterFolderName();
-    const res = await fetch(`http://${getHost()}/api/counters/settings/${encodeURIComponent(folder)}`, {
-      cache: "no-store",
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const raw = data?.values?.userSuggestions;
-      if (typeof raw === "string") {
-        const parsed = JSON.parse(raw);
-        for (const [k, v] of Object.entries(parsed)) {
-          suggestionsStore.set(k, v);
-        }
-      } else if (raw && typeof raw === "object") {
-        for (const [k, v] of Object.entries(raw)) {
-          suggestionsStore.set(k, v);
-        }
-      }
-    }
-  } catch (e) {
-    // Non-blocking if Tosu settings endpoint is unavailable
-  }
-}
-
-async function saveStoredSuggestions() {
-  const obj = Object.fromEntries(suggestionsStore);
-  const serialized = JSON.stringify(obj);
-
-  // 1. Sync to localStorage
-  try {
-    localStorage.setItem("o2jam_user_suggestions", serialized);
-  } catch (e) {
-    console.warn("[O2Jam Predictor] LocalStorage save error:", e);
-  }
-
-  // 2. Sync to Tosu settings API (disk persistence)
-  try {
-    const folder = getCounterFolderName();
-    let existingValues = {};
-    try {
-      const getRes = await fetch(`http://${getHost()}/api/counters/settings/${encodeURIComponent(folder)}`, {
-        cache: "no-store",
-      });
-      if (getRes.ok) {
-        const getJson = await getRes.json();
-        existingValues = getJson?.values || {};
-      }
-    } catch {}
-
-    // Preserve any existing settings keys so future UI settings will not be wiped
-    const payload = Object.entries(existingValues)
-      .filter(([k]) => k !== "userSuggestions")
-      .map(([uniqueID, value]) => ({ uniqueID, value }));
-
-    payload.push({ uniqueID: "userSuggestions", value: serialized });
-
-    await fetch(`http://${getHost()}/api/counters/settings/${encodeURIComponent(folder)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    console.log(`[O2Jam Predictor] Successfully saved ${suggestionsStore.size} suggestions to Tosu disk settings`);
-  } catch (e) {
-    console.error("[O2Jam Predictor] Failed to save to Tosu settings:", e);
-  }
-}
-
-function syncSuggestionUI() {
-  if (!suggestInput || !suggestBtn) return;
-  const key = getSuggestionKey(currentMap.md5, currentMap.rate);
-  const existing = suggestionsStore.get(key) || (Math.abs(currentMap.rate - 1.0) < 0.01 ? null : suggestionsStore.get(currentMap.md5));
-
-  if (existing && existing.suggested) {
-    suggestInput.value = existing.suggested;
-    suggestBtn.textContent = "Saved";
-    suggestBtn.classList.add("saved");
-  } else {
-    suggestInput.value = "";
-    suggestBtn.textContent = "Save";
-    suggestBtn.classList.remove("saved");
-  }
-}
-
-// ── 7. Main Recompute Handler ───────────────────────────────────────────────
+// ── 6. Main Recompute Handler ───────────────────────────────────────────────
 async function processCurrentBeatmap() {
   if (isPredicting) return;
   isPredicting = true;
@@ -358,13 +233,12 @@ async function processCurrentBeatmap() {
 
   try {
     const osuText = await fetchActiveBeatmap();
-    const parsed = parseOsuBeatmap(osuText, currentMap.rate);
+    const parsed = parseOsuBeatmap(osuText, currentRate);
 
     if (!parsed.is7KMania) {
       levelDisplay.textContent = "--";
       if (rateBadge) rateBadge.hidden = true;
       updateStatus(`Non-7K (${parsed.circleSize}K)`, "idle");
-      syncSuggestionUI();
       return;
     }
 
@@ -372,39 +246,33 @@ async function processCurrentBeatmap() {
       levelDisplay.textContent = "--";
       if (rateBadge) rateBadge.hidden = true;
       updateStatus(parsed.error, "warning");
-      syncSuggestionUI();
       return;
     }
 
     // Update rate badge
     if (rateBadge) {
-      if (Math.abs(currentMap.rate - 1.0) > 0.01) {
-        rateBadge.textContent = currentMap.modText || `${currentMap.rate.toFixed(2)}x`;
+      if (Math.abs(currentRate - 1.0) > 0.01) {
+        rateBadge.textContent = currentModText || `${currentRate.toFixed(2)}x`;
         rateBadge.hidden = false;
       } else {
         rateBadge.hidden = true;
       }
     }
 
-    currentMap.noteCount = parsed.noteCount;
     updateStatus("Predicting...", "loading");
     const predResult = await runPrediction(parsed);
 
     if (predResult) {
       const roundedLevel = Math.round(predResult.level);
-      currentMap.predictedLevel = roundedLevel;
-
       levelDisplay.textContent = roundedLevel;
       levelDisplay.classList.remove("pulse");
       void levelDisplay.offsetWidth;
       levelDisplay.classList.add("pulse");
 
-      const rateInfo = Math.abs(currentMap.rate - 1.0) > 0.01 ? ` [${currentMap.modText}]` : "";
+      const rateInfo = Math.abs(currentRate - 1.0) > 0.01 ? ` [${currentModText}]` : "";
       updateStatus(`7K${rateInfo} (${predResult.latencyMs}ms)`, "");
-      console.log(`[O2Jam Predictor] Level: ${predResult.level.toFixed(2)} (Round: ${roundedLevel}) @ rate ${currentMap.rate}`);
+      console.log(`[O2Jam Predictor] Level: ${predResult.level.toFixed(2)} (Round: ${roundedLevel}) @ rate ${currentRate}`);
     }
-
-    syncSuggestionUI();
   } catch (err) {
     console.error("[O2Jam Predictor] Error processing beatmap:", err);
     updateStatus("Error reading map", "warning");
@@ -413,60 +281,7 @@ async function processCurrentBeatmap() {
   }
 }
 
-// ── 8. User Feedback Event Handlers ─────────────────────────────────────────
-if (feedbackForm) {
-  feedbackForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (!currentMap.md5) return;
-
-    const rawVal = suggestInput.value.trim();
-    const numVal = parseInt(rawVal, 10);
-
-    // Sanitize: only integer between 10 and 185
-    if (isNaN(numVal) || numVal < 10 || numVal > 185) {
-      suggestInput.classList.add("invalid");
-      setTimeout(() => suggestInput.classList.remove("invalid"), 400);
-      return;
-    }
-
-    const key = getSuggestionKey(currentMap.md5, currentMap.rate);
-    const record = {
-      beatmap_id: currentMap.beatmap_id || 0,
-      beatmapset_id: currentMap.beatmapset_id || 0,
-      md5: currentMap.md5,
-      title: currentMap.title,
-      artist: currentMap.artist,
-      version: currentMap.version,
-      creator: currentMap.creator,
-      predicted: currentMap.predictedLevel,
-      suggested: numVal,
-      rate: currentMap.rate,
-      modText: currentMap.modText,
-      osu_link: currentMap.beatmap_id
-        ? `https://osu.ppy.sh/b/${currentMap.beatmap_id}`
-        : currentMap.beatmapset_id
-        ? `https://osu.ppy.sh/beatmapsets/${currentMap.beatmapset_id}`
-        : "",
-      noteCount: currentMap.noteCount,
-      updatedAt: new Date().toISOString(),
-    };
-
-    suggestionsStore.set(key, record);
-    suggestBtn.textContent = "Saved!";
-    suggestBtn.classList.add("saved");
-
-    await saveStoredSuggestions();
-  });
-}
-
-if (suggestInput) {
-  suggestInput.addEventListener("input", () => {
-    suggestBtn.textContent = "Save";
-    suggestBtn.classList.remove("saved");
-  });
-}
-
-// ── 9. Tosu WebSocket Connections ───────────────────────────────────────────
+// ── 7. Tosu WebSocket Connections ───────────────────────────────────────────
 function connectToTosu() {
   const host = getHost();
   const counterPath = getCounterFolderName();
@@ -489,14 +304,10 @@ function connectToTosu() {
 
       const md5 = (bm?.checksum || bm?.md5 || "").toLowerCase();
       const id = bm?.id || 0;
-      const setId = bm?.setId || bm?.set_id || 0;
       const title = bm?.title || "";
-      const artist = bm?.artist || "";
       const version = bm?.version || "";
-      const creator = bm?.creator || "";
 
       const { rate, modText } = extractRateAndMods(data);
-
       const processKey = `${md5 || id}:${title}:${version}@${rate.toFixed(2)}`;
 
       if (processKey === lastProcessedKey) {
@@ -504,17 +315,8 @@ function connectToTosu() {
       }
 
       lastProcessedKey = processKey;
-
-      // Update current map state
-      currentMap.md5 = md5;
-      currentMap.beatmap_id = id;
-      currentMap.beatmapset_id = setId;
-      currentMap.title = title;
-      currentMap.artist = artist;
-      currentMap.version = version;
-      currentMap.creator = creator;
-      currentMap.rate = rate;
-      currentMap.modText = modText;
+      currentRate = rate;
+      currentModText = modText;
 
       processCurrentBeatmap();
     } catch (err) {
@@ -534,7 +336,6 @@ function connectToTosu() {
 
 // Start
 async function main() {
-  await loadStoredSuggestions();
   await initONNX();
   connectToTosu();
 }
