@@ -107,3 +107,41 @@ Predict human-assigned O2Jam difficulty "Level" (ranging ~1 to 180+) of 7-key os
   - Evaluates `model.onnx` and renders animated O2Jam Level badge with song title and latency indicator.
   - Tosu dashboard compatible with `metadata.txt` and `settings.json`.
 - **CLI Predictor Tool:** [`predict.py`](file:///d:/Projects/o2jam-level-calc/predict.py) for testing any `.osu` file directly from terminal in ~30ms.
+
+---
+
+### Step 5: Empirical Error Analysis & Model v2 Architecture Plan
+- **Status:** In Progress / Analysis Completed
+- **Investigation:** Evaluated `model.onnx` across 1,328 charts using [`analyze_errors_onnx.py`](file:///d:/Projects/o2jam-level-calc/analyze_errors_onnx.py) and inspected sliding window burst densities (1s, 5s, 15s) against prediction errors.
+- **Empirical Findings:**
+  - **Quick Diff Spike Over-Prediction (+15 to +50 levels):**
+    - Charts with massive 1s peak note bursts but low average density trigger Global Max Pooling (GMP). Because GMP is duration-blind, brief 1s spikes fool the model into rating the entire chart as ultra-hard.
+    - *Example:* *perditus paradisus* (Actual: Lv.83, Predicted: **Lv.133.1**, Err: **+50.1**, Peak 1s: 83.0 NPS, Spike Ratio: 3.78x).
+    - *Example:* *[SHD]AAA* (Actual: Lv.50, Predicted: **Lv.69.4**, Err: **+19.4**, Peak 1s: 78.0 NPS, Spike Ratio: 5.28x).
+  - **Prolonged Stamina Under-Prediction (-15 to -33 levels):**
+    - Charts with relentless continuous streams and heavy chords (quads/hands) but no extreme 1s burst spike have low spike ratios (1.5x - 1.8x). Without an isolated spike, GMP doesn't latch, and Global Average Pooling (GAP) dilutes the density across the full song duration.
+    - *Example:* *Vend* (Actual: Lv.84, Predicted: **Lv.50.9**, Err: **-33.1**, 4,015 notes across 3 min, 461 four-note quads, Spike Ratio: 1.75x).
+    - *Example:* *LIMBO* (Actual: Lv.60, Predicted: **Lv.38.2**, Err: **-21.8**, 2,959 notes across 2.5 min, Spike Ratio: 1.60x).
+
+- **v2 Architecture Upgrades:**
+  1. **Multi-Scale Temporal Pooling:**
+     - Replace raw GMP + GAP with 4 rolling average window pools followed by max pooling:
+       - $\tau_1 = 1\text{s}$ (50 frames): Peak micro-burst (jacks, rolls)
+       - $\tau_2 = 4\text{s}$ (200 frames): Standard phrase difficulty
+       - $\tau_3 = 12\text{s}$ (600 frames): Sustained climax density
+       - $\tau_4 = 30\text{s}$ (1,500 frames): Prolonged stamina drain
+     - Comparing $\text{pool}_{1\text{s}}$ against $\text{pool}_{30\text{s}}$ lets the MLP explicitly distinguish short bursts from marathon stamina.
+  2. **Chord Density Feature Channel:**
+     - Add simultaneous note attack counts (0 to 7) as an extra input channel so quad-streams (like *Vend*) are explicitly visible to the CNN.
+  3. **Multi-Task Auxiliary Loss (Peak NPS vs. Sustained NPS):**
+     - Auxiliary head predicting deterministically computed Peak 1s NPS, Peak 10s NPS, and Mean NPS to guide backbone representation learning without human annotation overhead (discarded at ONNX export).
+  4. **Tier-Weighted Loss / Log-Space Calibration:**
+     - Mitigates conservative regression toward the dataset mean on Lv. 120+ charts.
+
+- **Serving & Resource Feasibility:**
+  - **Model File Size:** Pooling layers have 0 trainable weights. MLP input expands from 384 to 640 dim (+32,768 parameters = +131 KB). Total ONNX size remains **~2.9 MB**.
+  - **Inference Latency:** 4 1D pooling ops add $<0.5\text{ms}$ on CPU/WASM. Overlay latency stays **< 15ms**.
+  - **Training on RTX 3050 Ti Laptop (4GB VRAM):**
+    - Model footprint is ~500 MB - 1 GB VRAM at batch size 8 or 16 with AMP FP16.
+    - Estimated training time for 30 epochs on 1,328 charts: **~5–8 minutes**.
+
