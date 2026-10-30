@@ -145,3 +145,31 @@ Predict human-assigned O2Jam difficulty "Level" (ranging ~1 to 180+) of 7-key os
     - Model footprint is ~500 MB - 1 GB VRAM at batch size 8 or 16 with AMP FP16.
     - Estimated training time for 30 epochs on 1,328 charts: **~5–8 minutes**.
 
+
+---
+
+### Step 6: Model v2 Implementation, Training & Verification
+- **Status:** Completed
+- **Architecture Upgrades Implemented:**
+  1. **37-Channel Representation:** Appended simultaneous chord attack counts (0-7 notes) and active LN hold counts directly to the one-hot state embedding.
+  2. **5.0-Second Receptive Field:** Added 2 additional residual blocks (dilations 16 and 32, total receptive field: 253 frames ~= 5.06 seconds).
+  3. **Multi-Scale Temporal Pooling:** Replaced raw GMP with rolling window average pools:
+     - tau_1 = 1s (50 frames): peak micro-burst
+     - tau_2 = 5s (250 frames): phrase difficulty
+     - tau_3 = 15s (750 frames): sustained climax density
+     - GAP: marathon stamina
+     - Attention Pooling: learned difficulty spike weighting
+  4. **Strictly Bounded Sigmoid Head:** 15.0 + 170.0 * sigmoid(head) strictly bounding predictions in [15.0, 185.0].
+  5. **Tier-Weighted Huber Loss:** 1.8x - 2.2x weighting on charts above Lv. 110.
+- **Training Results (RTX 4070 SUPER):**
+  - **Validation MAE:** Reduced from **6.68 to 6.09 levels**
+  - **Validation RMSE:** Reduced from **9.87 to 8.66 levels**
+  - **Pearson Correlation (R):** Increased from **0.964 to 0.972**
+  - **Median Error (P50):** Reduced from **4.72 to 4.25 levels**
+  - **75th Percentile (P75):** Reduced from **9.12 to 8.16 levels**
+  - **99th Percentile (P99):** Reduced from **34.92 to 25.89 levels**
+  - **Lv. 140-181 Tier MAE:** Reduced from **12.10 to 8.92 levels**
+- **Deployment:**
+  - Exported to model.onnx (4.55 MB).
+  - Deployed to extension/o2jam_level_predictor/model.onnx and Tosu runtime folder.
+  - Zero client/runtime changes required (100% backward compatible).

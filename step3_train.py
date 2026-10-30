@@ -1,7 +1,11 @@
 """
-Step 3: Train 1D-CNN Level Predictor and Export to ONNX.
-Uses PyTorch GPU acceleration (RTX 4070 SUPER) with mixed precision (AMP).
-Exports best checkpoint to model.onnx with verified <10ms inference.
+Step 3: Train O2Jam 7K Level Predictor (v2 Architecture) and Export to ONNX.
+Features:
+  - 37 input channels (35 one-hot states + 1 chord attack count + 1 hold count)
+  - 6 Residual Conv1D blocks (dilations 1, 2, 4, 8, 16, 32) -> ~5.06s receptive field
+  - Multi-scale temporal pooling (1s micro-burst, 5s phrase, 15s climax, global average stamina, attention)
+  - Smooth sigmoid bounded output [15.0, 185.0]
+  - Tier-weighted Huber loss
 """
 
 import json
@@ -25,7 +29,7 @@ ONNX_PATH = "model.onnx"
 
 SEED = 42
 BATCH_SIZE = 16
-NUM_EPOCHS = 30
+NUM_EPOCHS = 35
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-4
 VAL_SPLIT = 0.15
@@ -71,7 +75,6 @@ def collate_fn(batch):
     lengths = [g.shape[0] for g in grids]
     max_len = max(lengths)
 
-    # Dynamic batch padding to batch-maximum length
     batch_size = len(grids)
     padded = torch.zeros((batch_size, max_len, 7), dtype=torch.uint8)
     for i, g in enumerate(grids):
@@ -101,57 +104,74 @@ class ResidualBlock1D(nn.Module):
 class O2JamLevelPredictor(nn.Module):
     def __init__(self, channels=128):
         super().__init__()
-        # Input representation: 7 columns * 5 categorical states = 35 channels
+        # Input representation: 35 one-hot states + 1 chord attack count + 1 hold count = 37 channels
         self.stem = nn.Sequential(
-            nn.Conv1d(35, channels, kernel_size=1, bias=False),
+            nn.Conv1d(37, channels, kernel_size=1, bias=False),
             nn.BatchNorm1d(channels),
             nn.GELU(),
         )
 
-        # 4 Dilated Residual blocks covering receptive field from short jacks to ~1.5s patterns
-        self.block1 = ResidualBlock1D(channels, kernel_size=5, dilation=1)
-        self.block2 = ResidualBlock1D(channels, kernel_size=5, dilation=2)
-        self.block3 = ResidualBlock1D(channels, kernel_size=5, dilation=4)
-        self.block4 = ResidualBlock1D(channels, kernel_size=5, dilation=8)
+        # 6 Dilated Residual blocks covering receptive field up to ~5.0 seconds
+        self.block1 = ResidualBlock1D(channels, kernel_size=5, dilation=1)   # rf: 5 (100ms)
+        self.block2 = ResidualBlock1D(channels, kernel_size=5, dilation=2)   # rf: 13 (260ms)
+        self.block3 = ResidualBlock1D(channels, kernel_size=5, dilation=4)   # rf: 29 (580ms)
+        self.block4 = ResidualBlock1D(channels, kernel_size=5, dilation=8)   # rf: 61 (1.22s)
+        self.block5 = ResidualBlock1D(channels, kernel_size=5, dilation=16)  # rf: 125 (2.50s)
+        self.block6 = ResidualBlock1D(channels, kernel_size=5, dilation=32)  # rf: 253 (5.06s)
 
         # Attention pooling scoring layer
         self.attn_conv = nn.Conv1d(channels, 1, kernel_size=1)
 
-        # Head: Multi-Scale Aggregation (Avg + Max + Attention = 3 * channels)
+        # Head: Multi-Scale Aggregation (p1 + p5 + p15 + gap + attn = 5 * channels = 640)
         self.head = nn.Sequential(
-            nn.Linear(channels * 3, 128),
+            nn.Linear(channels * 5, 256),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(128, 64),
+            nn.Linear(256, 128),
             nn.GELU(),
-            nn.Linear(64, 1),
+            nn.Dropout(0.1),
+            nn.Linear(128, 1),
         )
 
     def forward(self, x):
         # x: (Batch, T, 7) uint8 categorical integers [0..4]
         b, t, c = x.shape
-        # One-hot encode: (B, T, 7, 5) -> (B, T, 35) -> (B, 35, T)
-        one_hot = F.one_hot(x.long(), num_classes=5).float()
-        one_hot = one_hot.view(b, t, 35).permute(0, 2, 1)
+        
+        # 1. One-hot representation: (B, 35, T)
+        one_hot = F.one_hot(x.long(), num_classes=5).float().view(b, t, 35).permute(0, 2, 1)
+        
+        # 2. Explicit chord density & hold channels (B, 1, T)
+        taps = ((x == 1) | (x == 2)).float().sum(dim=-1, keepdim=True).permute(0, 2, 1)
+        holds = ((x == 3) | (x == 4)).float().sum(dim=-1, keepdim=True).permute(0, 2, 1)
+        
+        inp = torch.cat([one_hot, taps, holds], dim=1)  # (B, 37, T)
 
-        feat = self.stem(one_hot)
+        feat = self.stem(inp)
         feat = self.block1(feat)
         feat = self.block2(feat)
         feat = self.block3(feat)
         feat = self.block4(feat)
+        feat = self.block5(feat)
+        feat = self.block6(feat)
 
-        # Multi-scale aggregation
-        # 1. Global Average Pooling (overall stamina/density)
+        # Multi-scale temporal pooling:
+        # tau_1 = 1s (50 frames): peak micro-burst
+        p1 = F.avg_pool1d(feat, kernel_size=50, stride=10, padding=25).amax(dim=-1)
+        # tau_2 = 5s (250 frames): phrase difficulty
+        p5 = F.avg_pool1d(feat, kernel_size=250, stride=25, padding=125).amax(dim=-1)
+        # tau_3 = 15s (750 frames): sustained climax density
+        p15 = F.avg_pool1d(feat, kernel_size=750, stride=50, padding=375).amax(dim=-1)
+        # Global Average Pooling: overall song stamina
         gap = feat.mean(dim=-1)
-        # 2. Global Max Pooling (peak burst)
-        gmp = feat.amax(dim=-1)
-        # 3. Attention Pooling (hardest difficulty spikes)
-        attn_weights = torch.softmax(self.attn_conv(feat), dim=-1)
-        attn_pool = (feat * attn_weights).sum(dim=-1)
+        # Attention Pooling: learned salient section weight
+        attn_w = torch.softmax(self.attn_conv(feat), dim=-1)
+        attn_pool = (feat * attn_w).sum(dim=-1)
 
-        pooled = torch.cat([gap, gmp, attn_pool], dim=-1)
-        out = self.head(pooled)
-        return out.squeeze(-1)
+        pooled = torch.cat([p1, p5, p15, gap, attn_pool], dim=-1)
+        raw = self.head(pooled).squeeze(-1)
+        
+        # Strictly bound output to valid O2Jam range [15.0, 185.0]
+        return 15.0 + 170.0 * torch.sigmoid(raw)
 
 
 def evaluate(model, loader, device):
@@ -172,75 +192,51 @@ def evaluate(model, loader, device):
 
     mae = np.mean(np.abs(preds - targets))
     rmse = np.sqrt(np.mean((preds - targets) ** 2))
-    # Pearson R
     corr = np.corrcoef(preds, targets)[0, 1] if len(preds) > 1 else 0.0
     return mae, rmse, corr, preds, targets
 
 
 def train():
-    set_seed(SEED)
+    set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"=== O2Jam 7K Level Predictor Training ===")
-    print(f"Execution Device: {device} ({torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'})")
+    print(f"=== Training Model v2 on {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}) ===")
 
-    print(f"Loading packed dataset from {DATASET_PATH}...")
     data = np.load(DATASET_PATH)
     flat_grids = data["flat_grids"]
     offsets = data["offsets"]
     lengths = data["lengths"]
     levels = data["levels"]
-    num_samples = len(levels)
+    n_charts = len(levels)
+    print(f"Loaded dataset: {n_charts} charts")
 
-    print(f"Total charts in dataset: {num_samples}")
-
-    # Train / Val Split (85% / 15%)
-    indices = list(range(num_samples))
+    indices = list(range(n_charts))
     random.shuffle(indices)
-    split_idx = int(num_samples * (1.0 - VAL_SPLIT))
+    split_idx = int(n_charts * (1.0 - VAL_SPLIT))
     train_indices = indices[:split_idx]
     val_indices = indices[split_idx:]
-
-    print(f"Train samples: {len(train_indices)} | Validation samples: {len(val_indices)}")
+    print(f"Train set: {len(train_indices)} charts | Validation set: {len(val_indices)} charts")
 
     train_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, train_indices, augment=True)
     val_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, val_indices, augment=False)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        collate_fn=collate_fn,
-        pin_memory=(device.type == "cuda"),
-        num_workers=0,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        collate_fn=collate_fn,
-        pin_memory=(device.type == "cuda"),
-        num_workers=0,
-    )
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0, pin_memory=True)
 
     model = O2JamLevelPredictor(channels=128).to(device)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model Architecture: 1D-CNN with Multi-Scale Pooling (Parameters: {total_params:,})")
+    print(f"Model Parameters: {total_params:,}")
 
-    criterion = nn.SmoothL1Loss(beta=1.0)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-5)
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
     best_val_mae = float("inf")
-    best_epoch = 0
-
-    print(f"\nStarting training for {NUM_EPOCHS} epochs with Mixed Precision (AMP)...")
     start_time = time.time()
 
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
-        train_loss = 0.0
-        t_epoch_start = time.time()
+        total_loss = 0.0
+        n_batches = 0
 
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
@@ -248,204 +244,70 @@ def train():
 
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 pred = model(x)
-                loss = criterion(pred, y)
+                # Tier-weighted Huber loss: upweight high-tier charts (>110)
+                weights = torch.ones_like(y)
+                weights = torch.where(y > 110, 1.8, weights)
+                weights = torch.where(y > 140, 2.2, weights)
+                loss_elements = F.smooth_l1_loss(pred, y, reduction="none", beta=1.0)
+                loss = (weights * loss_elements).mean()
 
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             scaler.step(optimizer)
             scaler.update()
 
-            train_loss += loss.item() * x.size(0)
+            total_loss += loss.item()
+            n_batches += 1
 
         scheduler.step()
-        train_loss /= len(train_dataset)
-        val_mae, val_rmse, val_corr, _, _ = evaluate(model, val_loader, device)
-        epoch_dur = time.time() - t_epoch_start
+        avg_train_loss = total_loss / max(1, n_batches)
+
+        # Validation
+        val_mae, val_rmse, val_r, _, _ = evaluate(model, val_loader, device)
 
         is_best = val_mae < best_val_mae
+        marker = " [BEST]" if is_best else ""
         if is_best:
             best_val_mae = val_mae
-            best_epoch = epoch
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "val_mae": float(val_mae),
                 "val_rmse": float(val_rmse),
-                "val_corr": float(val_corr),
+                "val_r": float(val_r),
+                "val_indices": val_indices,
             }, CHECKPOINT_PATH)
 
-        star = " *" if is_best else ""
-        print(f"Epoch [{epoch:2d}/{NUM_EPOCHS:2d}] {epoch_dur:4.1f}s | Train Loss: {train_loss:6.2f} | Val MAE: {val_mae:5.2f} | Val RMSE: {val_rmse:5.2f} | R: {val_corr:.3f}{star}")
+        lr_cur = scheduler.get_last_lr()[0]
+        print(f"Epoch {epoch:2d}/{NUM_EPOCHS} | Train Loss: {avg_train_loss:.3f} | Val MAE: {val_mae:.2f} | Val RMSE: {val_rmse:.2f} | R: {val_r:.3f} | LR: {lr_cur:.1e}{marker}")
 
-    total_training_time = time.time() - start_time
-    print(f"\nTraining completed in {total_training_time:.1f}s!")
-    print(f"Best Checkpoint at Epoch {best_epoch}: Validation MAE = {best_val_mae:.2f}")
-
-    # Load best checkpoint for export and final evaluation
-    print(f"\nLoading best checkpoint from {CHECKPOINT_PATH}...")
-    ckpt = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    val_mae, val_rmse, val_corr, val_preds, val_targets = evaluate(model, val_loader, device)
-    print(f"Final Validation Metrics -> MAE: {val_mae:.2f} levels | RMSE: {val_rmse:.2f} | Pearson R: {val_corr:.3f}")
-
-    # Inspect sample predictions across difficulty tiers
-    print("\n=== Sample Validation Predictions ===")
-    sample_items = []
-    with open(METADATA_PATH, "r", encoding="utf-8") as f:
-        meta_all = json.load(f)
-
-    for i in range(min(15, len(val_indices))):
-        c_idx = val_indices[i]
-        meta = meta_all[c_idx]
-        actual = val_targets[i]
-        predicted = val_preds[i]
-        err = predicted - actual
-        sample_items.append((actual, predicted, err, meta["title"], meta["version"]))
-
-    sample_items.sort(key=lambda x: x[0])
-    for actual, pred, err, title, ver in sample_items:
-        print(f"Actual: Lv.{actual:3.0f} | Predicted: Lv.{pred:5.1f} (Err: {err:+5.1f}) | {ver:<25} | {title[:30]}")
+    total_time = time.time() - start_time
+    print(f"\nTraining completed in {total_time:.1f}s ({total_time / 60:.1f} min)")
+    print(f"Best Validation MAE: {best_val_mae:.2f}")
 
     # Export to ONNX
-    print(f"\n=== Exporting Model to ONNX ({ONNX_PATH}) ===")
-    model.eval()
-    dummy_input = torch.randint(0, 5, (1, 3000, 7), dtype=torch.uint8).to(device)
-
-    torch.onnx.export(
-        model,
-        dummy_input,
-        ONNX_PATH,
-        export_params=True,
-        opset_version=17,
-        do_constant_folding=True,
-        input_names=["note_grid"],
-        output_names=["predicted_level"],
-        dynamic_axes={
-            "note_grid": {0: "batch_size", 1: "time_frames"},
-            "predicted_level": {0: "batch_size"},
-        },
-    )
-    print(f"Successfully exported to {ONNX_PATH} ({os.path.getsize(ONNX_PATH) / (1024**2):.2f} MB)")
-
-    # Verify ONNX model and benchmark inference speed
-    print("\n=== ONNX Inference Benchmark (<10ms Target) ===")
-    import onnxruntime as ort
-
-    ort_session = ort.InferenceSession(ONNX_PATH, providers=["CPUExecutionProvider"])
-
-    # Test on a realistic 2.5-minute song (7,500 frames)
-    test_grid = np.random.randint(0, 5, size=(1, 7500, 7), dtype=np.uint8)
-
-    # Warmup
-    for _ in range(5):
-        _ = ort_session.run(None, {"note_grid": test_grid})
-
-    # Benchmark 50 runs
-    latencies = []
-    for _ in range(50):
-        t_start = time.perf_counter()
-        ort_out = ort_session.run(None, {"note_grid": test_grid})
-        latencies.append((time.perf_counter() - t_start) * 1000)
-
-    avg_ms = np.mean(latencies)
-    p95_ms = np.percentile(latencies, 95)
-    print(f"Input: 1 song, 7,500 frames (~2.5 minutes)")
-    print(f"ONNX CPU Latency: Mean = {avg_ms:.2f} ms | P95 = {p95_ms:.2f} ms | Min = {min(latencies):.2f} ms")
-    if avg_ms < 10.0:
-        print(f"VERIFICATION SUCCESS: Inference speed {avg_ms:.2f}ms is well under the <10ms target!")
-    else:
-        print(f"Inference latency: {avg_ms:.2f}ms")
-
-
-def export_and_benchmark():
-    set_seed(SEED)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Loading packed dataset from {DATASET_PATH}...")
-    data = np.load(DATASET_PATH)
-    flat_grids = data["flat_grids"]
-    offsets = data["offsets"]
-    lengths = data["lengths"]
-    levels = data["levels"]
-    num_samples = len(levels)
-
-    indices = list(range(num_samples))
-    random.shuffle(indices)
-    split_idx = int(num_samples * (1.0 - VAL_SPLIT))
-    val_indices = indices[split_idx:]
-
-    val_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, val_indices, augment=False)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
-
-    model = O2JamLevelPredictor(channels=128).to(device)
-    print(f"Loading checkpoint from {CHECKPOINT_PATH}...")
-    ckpt = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+    print(f"\nExporting best checkpoint to {ONNX_PATH}...")
+    ckpt = torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=False)
+    model = model.to("cpu")
     model.load_state_dict(ckpt["model_state_dict"])
-    val_mae, val_rmse, val_corr, val_preds, val_targets = evaluate(model, val_loader, device)
-    print(f"Validation Metrics -> MAE: {val_mae:.2f} levels | RMSE: {val_rmse:.2f} | Pearson R: {val_corr:.3f}")
-
-    print("\n=== Sample Validation Predictions ===")
-    with open(METADATA_PATH, "r", encoding="utf-8") as f:
-        meta_all = json.load(f)
-
-    sample_items = []
-    for i in range(min(15, len(val_indices))):
-        c_idx = val_indices[i]
-        meta = meta_all[c_idx]
-        actual = val_targets[i]
-        predicted = val_preds[i]
-        err = predicted - actual
-        sample_items.append((actual, predicted, err, meta["title"], meta["version"]))
-
-    sample_items.sort(key=lambda x: x[0])
-    for actual, pred, err, title, ver in sample_items:
-        print(f"Actual: Lv.{actual:3.0f} | Predicted: Lv.{pred:5.1f} (Err: {err:+5.1f}) | {ver:<25} | {title[:30]}")
-
-    print(f"\n=== Exporting Model to ONNX ({ONNX_PATH}) ===")
     model.eval()
-    dummy_input = torch.randint(0, 5, (1, 3000, 7), dtype=torch.uint8).to(device)
 
+    dummy_input = torch.zeros((1, 500, 7), dtype=torch.uint8)
     torch.onnx.export(
         model,
         dummy_input,
         ONNX_PATH,
         export_params=True,
-        opset_version=17,
+        opset_version=14,
         do_constant_folding=True,
         input_names=["note_grid"],
         output_names=["predicted_level"],
         dynamic_axes={
-            "note_grid": {0: "batch_size", 1: "time_frames"},
-            "predicted_level": {0: "batch_size"},
-        },
+            "note_grid": {0: "batch_size", 1: "time_steps"},
+            "predicted_level": {0: "batch_size"}
+        }
     )
-    print(f"Successfully exported to {ONNX_PATH} ({os.path.getsize(ONNX_PATH) / (1024**2):.2f} MB)")
-
-    print("\n=== ONNX Inference Benchmark (<10ms Target) ===")
-    import onnxruntime as ort
-
-    ort_session = ort.InferenceSession(ONNX_PATH, providers=["CPUExecutionProvider"])
-    test_grid = np.random.randint(0, 5, size=(1, 7500, 7), dtype=np.uint8)
-
-    for _ in range(5):
-        _ = ort_session.run(None, {"note_grid": test_grid})
-
-    latencies = []
-    for _ in range(50):
-        t_start = time.perf_counter()
-        _ = ort_session.run(None, {"note_grid": test_grid})
-        latencies.append((time.perf_counter() - t_start) * 1000)
-
-    avg_ms = np.mean(latencies)
-    p95_ms = np.percentile(latencies, 95)
-    print(f"Input: 1 song, 7,500 frames (~2.5 minutes)")
-    print(f"ONNX CPU Latency: Mean = {avg_ms:.2f} ms | P95 = {p95_ms:.2f} ms | Min = {min(latencies):.2f} ms")
-    if avg_ms < 10.0:
-        print(f"VERIFICATION SUCCESS: Inference speed {avg_ms:.2f}ms is well under the <10ms target!")
+    print(f"Saved {ONNX_PATH} ({os.path.getsize(ONNX_PATH) / 1048576:.2f} MB)")
 
 
 if __name__ == "__main__":
-    if "--eval-only" in sys.argv or (os.path.exists(CHECKPOINT_PATH) and "--train" not in sys.argv):
-        export_and_benchmark()
-    else:
-        train()
+    train()

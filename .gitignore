@@ -9,18 +9,20 @@ env/
 .venv/
 
 # Data and Models
-data/
-*.npy
-*.npz
+data/*
+!data/o2jam_dataset.npz
+!data/dataset_metadata.json
+
 *.pt
 *.pth
+*.npy
+
+# ONNX & Extension runtime files
 *.onnx
 *.wasm
 *.mjs
-
-# Allow pre-trained lightweight ONNX model (<3MB) for plug-and-play CLI & Tosu overlay
 !model.onnx
-!extension/o2jam_level_predictor/model.onnx
+!extension/o2jam_level_predictor/**
 
 # Archives
 *.zip
