@@ -173,3 +173,39 @@ Predict human-assigned O2Jam difficulty "Level" (ranging ~1 to 180+) of 7-key os
   - Exported to model.onnx (4.55 MB).
   - Deployed to extension/o2jam_level_predictor/model.onnx and Tosu runtime folder.
   - Zero client/runtime changes required (100% backward compatible).
+
+
+---
+
+### Step 7: Unified Dataset Expansion (NSJAM .ojn + DMJAM + O2EZ)
+- **Status:** Completed
+- **Dataset Results:**
+  - Expanded unique charts from 2,557 to 4,055 charts (+58.6% increase).
+  - High-tier charts (Lv. 110-185) increased from ~320 to 559 charts.
+  - Retrained Model v2 on 4,055 charts (3,446 train / 609 val) with Asymmetric Huber Loss.
+  - **Validation MAE:** Reduced to **5.75 levels** (down from 6.68 in v1).
+  - **Validation RMSE:** Reduced to **8.59 levels**.
+  - **Median Error (P50):** Reduced to **<= 3.88 levels** (down from 4.72).
+  - **75th Percentile (P75):** Reduced to **<= 7.44 levels** (down from 9.12).
+  - Deployed to model.onnx and Tosu static extension.
+
+---
+
+### Step 8: Feedback System & Mod Rate Scaling (`extension/o2jam_level_predictor/`)
+- **Status:** Completed
+- **Changes Implemented:**
+  1. **Playback Rate & Mod Scaling (DT / HT / Custom Rates):**
+     - Extracts active mods and playback rate from Tosu v2 WebSocket stream (`gameplay.playbackRate`, `play.mods`, `menu.mods`, and lazer arrays).
+     - Full mod support: `DT` / `NC` (1.5x), `HT` / `DC` (0.75x), and fractional rates (e.g., 1.1x, 1.2x, 1.4x).
+     - Physically scales note onset and hold durations: `effective_t = (t - firstT) / rate`, `startFrame = Math.floor(effective_t / 20)`. Faster rates compress notes closer together in the 20ms grid, naturally causing the CNN to detect higher burst speeds and density.
+     - Adds a dynamic `.rate-badge` indicator when rate $\ne 1.0$ (e.g. `DT (1.5x)`, `HT (0.75x)`).
+  2. **Level Suggestion & Feedback UI:**
+     - Added an inline numeric input (`#suggest-input`) and save button (`#suggest-btn`) below the level readout.
+     - Strict input sanitization: integer in range $[10, 185]$ (invalid inputs trigger a subtle red shake animation).
+     - Auto-prefills if the active chart & rate combination was previously rated.
+  3. **Tosu Disk Persistence Architecture:**
+     - Saves suggestions to `C:\Users\Admin\Desktop\Apps\OsuRelated\tosu\settings\o2jam_level_predictor.values.json` via Tosu's `POST /api/counters/settings/o2jam_level_predictor` endpoint with dual-write to browser `localStorage`.
+     - Preserves all other keys in `values.json` so future user UI settings are never overwritten or corrupted.
+     - Records full beatmap metadata (`md5`, `beatmap_id`, `beatmapset_id`, `title`, `artist`, `version`, `creator`, `predicted`, `suggested`, `rate`, `modText`, `osu_link`, `noteCount`, `updatedAt`).
+- **Deployment:**
+  - Synchronized updated `index.html`, `index.js`, and `style.css` to `C:\Users\Admin\Desktop\Apps\OsuRelated\tosu\static\o2jam_level_predictor\`.
