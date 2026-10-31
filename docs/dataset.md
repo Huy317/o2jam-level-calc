@@ -11,8 +11,9 @@ The training dataset integrates **4,055 unique 7-key charts** across three major
 | **O2EZ** | `.osu` converts | O2EZ community modern re-ratings (`[O2EZ]`) | 696 |
 | **Total** | — | **Deduplicated Unified Dataset** | **4,055** |
 
-### Acknowledgments & Source Attribution
-The DMJAM and O2EZ chart collections were sourced from the [O2Jam to osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975) on the osu! community forums. We thank the organizers and mappers who preserved and standardized these converted charts with their original server difficulty tags intact.
+### Credits
+- DMJAM & O2EZ charts provided by the [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975).
+- `.ojn` binary decoding logic referenced from [o2jam-to-osu](https://github.com/LuzianU/o2jam-to-osu) by LuzianU.
 
 ---
 

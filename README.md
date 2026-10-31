@@ -93,10 +93,11 @@ For comprehensive technical specifications, explore the `docs/` directory:
 
 ---
 
-## Credits & Acknowledgments
+## Credits
 
-- **Chart Dataset:** Special thanks to the [O2Jam to osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975) by the osu! community for compiling and maintaining the DMJAM and O2EZ chart packs used to build our training dataset.
-- **Tosu:** Built to integrate with [Tosu](https://github.com/KotRikD/tosu) by KotRikD.
+- [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975): DMJAM and O2EZ chart packs.
+- [o2jam-to-osu](https://github.com/LuzianU/o2jam-to-osu): Reference for `.ojn` binary chart decoding.
+- [Tosu](https://github.com/KotRikD/tosu): Overlay platform and memory reader.
 
 ---
 
