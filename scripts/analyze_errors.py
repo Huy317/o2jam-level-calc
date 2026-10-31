@@ -1,12 +1,21 @@
 import json
+import os
 import random
+import sys
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
+sys.path.insert(0, os.path.dirname(__file__))
 from step3_train import O2JamLevelPredictor, O2JamDataset, collate_fn, evaluate, BATCH_SIZE, VAL_SPLIT, SEED
 
-data = np.load("data/o2jam_dataset.npz")
-with open("data/dataset_metadata.json", "r", encoding="utf-8") as f:
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATASET_PATH = os.path.join(REPO_ROOT, "data", "o2jam_dataset.npz")
+METADATA_PATH = os.path.join(REPO_ROOT, "data", "dataset_metadata.json")
+CHECKPOINT_PATH = os.path.join(REPO_ROOT, "best_model.pt")
+
+data = np.load(DATASET_PATH)
+with open(METADATA_PATH, "r", encoding="utf-8") as f:
     meta = json.load(f)
 
 random.seed(SEED)
@@ -17,7 +26,7 @@ val_indices = indices[split_idx:]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net = O2JamLevelPredictor(channels=128).to(device)
-ckpt = torch.load("best_model.pt", map_location=device, weights_only=False)
+ckpt = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
 net.load_state_dict(ckpt["model_state_dict"])
 
 val_dataset = O2JamDataset(data["flat_grids"], data["offsets"], data["lengths"], data["levels"], val_indices, augment=False)

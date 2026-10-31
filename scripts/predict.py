@@ -13,7 +13,8 @@ import onnxruntime as ort
 
 STEP_MS = 20
 MAX_FRAMES_CAP = 25000
-ONNX_MODEL_PATH = "model.onnx"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ONNX_MODEL_PATH = os.path.join(REPO_ROOT, "model.onnx")
 
 
 def parse_osu_beatmap(file_path):

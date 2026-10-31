@@ -1,8 +1,6 @@
 """
 Step 2: Unified O2Jam Dataset Builder (osu!mania converts + NSJAM .ojn native charts).
-Strictly READONLY on:
-  - D:\\osu!\\Songs
-  - D:\\Games\\NSJAM\\NSM01..NSM04
+Parses 7K .osu charts and binary .ojn charts into discrete (T, 7) uint8 grids.
 
 Outputs:
   - data/o2jam_dataset.npz (packed flat uint8 grids, offsets, lengths, levels)
@@ -21,15 +19,17 @@ import numpy as np
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-SONGS_DIR = r"D:\osu!\Songs"
+SONGS_DIR = os.environ.get("OSU_SONGS_DIR", r"D:\osu!\Songs")
+NSJAM_BASE = os.environ.get("NSJAM_DIR", r"D:\Games\NSJAM")
 NSJAM_DIRS = {
-    "NSM01_Easy": r"D:\Games\NSJAM\NSM01",
-    "NSM02_Normal": r"D:\Games\NSJAM\NSM02",
-    "NSM03_Hard": r"D:\Games\NSJAM\NSM03",
-    "NSM04_LN": r"D:\Games\NSJAM\NSM04",
+    "NSM01_Easy": os.path.join(NSJAM_BASE, "NSM01"),
+    "NSM02_Normal": os.path.join(NSJAM_BASE, "NSM02"),
+    "NSM03_Hard": os.path.join(NSJAM_BASE, "NSM03"),
+    "NSM04_LN": os.path.join(NSJAM_BASE, "NSM04"),
 }
 
-OUTPUT_DIR = "data"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+OUTPUT_DIR = os.path.join(REPO_ROOT, "data")
 OUTPUT_NPZ = os.path.join(OUTPUT_DIR, "o2jam_dataset.npz")
 OUTPUT_META = os.path.join(OUTPUT_DIR, "dataset_metadata.json")
 
@@ -312,7 +312,6 @@ def main():
     priority_counts = {PRIORITY_DMJAM: 0, PRIORITY_NSJAM: 0, PRIORITY_O2EZ: 0}
 
     for gh, chart_list in groups.items():
-        # Sort by priority ascending (0=DMJAM, 1=NSJAM, 2=O2EZ)
         chart_list.sort(key=lambda c: c["priority"])
         chosen = chart_list[0]
         unique_charts.append(chosen)

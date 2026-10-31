@@ -23,11 +23,12 @@ from torch.utils.data import Dataset, DataLoader
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-DATASET_PATH = os.path.join("data", "o2jam_dataset.npz")
-METADATA_PATH = os.path.join("data", "dataset_metadata.json")
-CHECKPOINT_PATH = "best_model.pt"
-ONNX_PATH = "model.onnx"
-EXTENSION_ONNX = os.path.join("extension", "o2jam_level_predictor", "model.onnx")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATASET_PATH = os.path.join(REPO_ROOT, "data", "o2jam_dataset.npz")
+METADATA_PATH = os.path.join(REPO_ROOT, "data", "dataset_metadata.json")
+CHECKPOINT_PATH = os.path.join(REPO_ROOT, "best_model.pt")
+ONNX_PATH = os.path.join(REPO_ROOT, "model.onnx")
+EXTENSION_ONNX = os.path.join(REPO_ROOT, "extension", "o2jam_level_predictor", "model.onnx")
 
 SEED = 42
 BATCH_SIZE = 16

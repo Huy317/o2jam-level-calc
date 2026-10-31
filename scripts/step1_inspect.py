@@ -1,5 +1,5 @@
 """
-Step 1: Inspect O2Jam 7K beatmaps in D:\\osu!\\Songs.
+Step 1: Inspect O2Jam 7K beatmaps in osu! Songs folder.
 Strictly READONLY inspection of [_O2Jam_]* folders.
 """
 
@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-SONGS_DIR = r"D:\osu!\Songs"
+SONGS_DIR = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("OSU_SONGS_DIR", r"D:\osu!\Songs")
 LEVEL_REGEX = re.compile(r"\[(\d+)\]\s*$")
 SERVER_TAG_REGEX = re.compile(r"\[([a-zA-Z0-9_\-]+)\]")
 
@@ -20,6 +20,7 @@ SERVER_TAG_REGEX = re.compile(r"\[([a-zA-Z0-9_\-]+)\]")
 def inspect():
     if not os.path.exists(SONGS_DIR):
         print(f"Error: Songs directory not found: {SONGS_DIR}")
+        print("Usage: python scripts/step1_inspect.py <path_to_songs_folder>")
         return
 
     o2jam_dirs = [
@@ -100,40 +101,51 @@ def inspect():
         level_list.append(level)
 
         if level <= 1:
-            levels_le_1.append((file_path, version_line, level))
+            levels_le_1.append((file_path, level, version_line))
 
-        # Extract all bracket tags before the level bracket
-        prefix = version_line[:match.start()].strip()
-        tags = SERVER_TAG_REGEX.findall(prefix)
-        # Full prefix grouping
-        server_tags[prefix] += 1
-        # Individual tag breakdown (e.g. O2EZ, H, N, E, D)
+        # Check server / difficulty tags
+        tags = SERVER_TAG_REGEX.findall(version_line)
         for t in tags:
-            difficulty_tags[t] += 1
+            tag_upper = t.upper()
+            if tag_upper in ("O2JAM", "O2EZ", "DMJAM", "NSJAM"):
+                server_tags[tag_upper] += 1
+            elif tag_upper in ("E", "N", "H", "D", "SH", "HD", "EX"):
+                difficulty_tags[tag_upper] += 1
 
-    print(f"\n=== Regex & Format Validation ===")
-    print(f"Charts matching level regex `\\[(\\d+)\\]\\s*$`: {matched_regex} / {len(osu_files)}")
-    print(f"Non-Mania (Mode != 3): {len(non_mania)}")
-    print(f"Non-7K (CircleSize != 7): {len(non_7k)}")
-    print(f"Failed to parse / unparseable files: {len(failed_regex)}")
-    for fp, reason in failed_regex[:10]:
-        print(f"  - {os.path.basename(fp)}: {reason}")
+    print(f"\n=== Verification Statistics ===")
+    print(f"Valid Mania 7K files: {len(osu_files) - len(non_mania) - len(non_7k)} / {len(osu_files)}")
+    if non_mania:
+        print(f"Non-Mania files (Mode != 3): {len(non_mania)}")
+    if non_7k:
+        print(f"Non-7K files (CircleSize != 7): {len(non_7k)}")
 
-    print(f"\n=== Level Statistics ===")
+    print(f"\nRegex Matches on Version line: {matched_regex} / {len(osu_files)} ({matched_regex / max(len(osu_files), 1) * 100:.1f}%)")
+    if failed_regex:
+        print(f"Failed to match ({len(failed_regex)} files):")
+        for f, reason in failed_regex[:10]:
+            print(f"  - {os.path.basename(f)}: {reason}")
+        if len(failed_regex) > 10:
+            print(f"  ... and {len(failed_regex) - 10} more.")
+
     if level_list:
-        print(f"Min Level: {min(level_list)}, Max Level: {max(level_list)}")
-        valid_levels = [l for l in level_list if l > 1]
-        print(f"Levels <= 1 (gimmick / unrated to be skipped): {len(levels_le_1)}")
+        valid_levels = [lvl for lvl in level_list if lvl > 1]
+        print(f"\n=== Level Distribution ===")
+        print(f"Total parsed levels: {len(level_list)}")
+        print(f"Levels <= 1 (gimmicks/unrated to exclude): {len(levels_le_1)}")
+        print(f"Valid levels (> 1): {len(valid_levels)}")
         if valid_levels:
-            print(f"Valid Levels (> 1): count={len(valid_levels)}, min={min(valid_levels)}, max={max(valid_levels)}, avg={sum(valid_levels)/len(valid_levels):.2f}")
+            print(f"Min level: {min(valid_levels)}")
+            print(f"Max level: {max(valid_levels)}")
+            print(f"Average level: {sum(valid_levels) / len(valid_levels):.2f}")
 
-    print(f"\n=== Server / Difficulty Tag Breakdown (Raw Prefix) ===")
+    print(f"\n=== Tag Distributions ===")
+    print("Server Tags in Version line:")
     for tag, count in server_tags.most_common():
-        print(f"  {tag:<30} : {count:>5} charts")
+        print(f"  [{tag}]: {count}")
 
-    print(f"\n=== Extracted Bracket Tags Breakdown ===")
+    print("Difficulty Tags in Version line:")
     for tag, count in difficulty_tags.most_common():
-        print(f"  [{tag}]: {count} occurrences")
+        print(f"  [{tag}]: {count}")
 
 
 if __name__ == "__main__":

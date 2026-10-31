@@ -4,9 +4,10 @@ import time
 import numpy as np
 import onnxruntime as ort
 
-DATASET_PATH = os.path.join("data", "o2jam_dataset.npz")
-METADATA_PATH = os.path.join("data", "dataset_metadata.json")
-ONNX_PATH = "model.onnx"
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATASET_PATH = os.path.join(REPO_ROOT, "data", "o2jam_dataset.npz")
+METADATA_PATH = os.path.join(REPO_ROOT, "data", "dataset_metadata.json")
+ONNX_PATH = os.path.join(REPO_ROOT, "model.onnx")
 
 def main():
     print("=== O2Jam 7K Level Error Analyzer (ONNX Runtime) ===")
