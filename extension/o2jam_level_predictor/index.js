@@ -7,8 +7,7 @@
 let ortSession = null;
 let lastProcessedKey = null;
 let isPredicting = false;
-let currentRate = 1.0;
-let currentModText = "";
+let currentRateInfo = { rate: 1.0, label: "", type: "" };
 
 // DOM Elements
 const levelDisplay = document.getElementById("level-display");
@@ -20,6 +19,17 @@ function updateStatus(text, dotClass = "idle") {
   if (statusText) statusText.textContent = text;
   if (statusDot) statusDot.className = `status-dot ${dotClass}`.trim();
   console.log(`[O2Jam Predictor] ${text}`);
+}
+
+function updateRateBadge(rateInfo) {
+  if (!rateBadge) return;
+  if (rateInfo && Math.abs(rateInfo.rate - 1.0) > 0.01 && rateInfo.label) {
+    rateBadge.textContent = rateInfo.label;
+    rateBadge.className = `rate-badge visible ${rateInfo.type}`.trim();
+  } else {
+    rateBadge.textContent = "";
+    rateBadge.className = "rate-badge";
+  }
 }
 
 function getHost() {
@@ -183,29 +193,37 @@ async function fetchActiveBeatmap() {
 
 // ── 5. Rate & Mod Extraction ────────────────────────────────────────────────
 function extractRateAndMods(data) {
-  // 1. Direct playbackRate if given by tosu
-  const rateCandidate = Number(data?.gameplay?.playbackRate || data?.playbackRate);
-  if (Number.isFinite(rateCandidate) && rateCandidate > 0 && Math.abs(rateCandidate - 1.0) > 0.01) {
+  const isPlaying = Number(data?.state?.number ?? data?.status?.number ?? 0) === 2;
+
+  // 1. Direct playbackRate if given by tosu during active play
+  const rateCandidate = Number(data?.gameplay?.playbackRate);
+  if (isPlaying && Number.isFinite(rateCandidate) && rateCandidate > 0 && Math.abs(rateCandidate - 1.0) > 0.01) {
     const formatted = rateCandidate.toFixed(2).replace(/\.?0+$/, "");
-    return { rate: rateCandidate, modText: `${formatted}x` };
+    return { rate: rateCandidate, label: `${formatted}x`, type: "rate" };
   }
 
-  // 2. Mod objects (gameplay / play / menu)
-  const mods = data?.play?.mods || data?.gameplay?.mods || data?.menu?.mods;
+  // 2. Mod candidates: prioritize menu.mods when in song select / menus
+  const mods = isPlaying
+    ? (data?.play?.mods || data?.gameplay?.mods || data?.menu?.mods)
+    : (data?.menu?.mods || data?.play?.mods || data?.gameplay?.mods);
+
   const name = typeof mods?.name === "string" ? mods.name.toUpperCase() : "";
   const num = Number(mods?.number ?? mods?.num ?? 0);
 
+  // Check DT / NC
   if (name.includes("NC") || (num & 512) !== 0) {
-    return { rate: 1.5, modText: "NC (1.5x)" };
+    return { rate: 1.5, label: "NC", type: "dt" };
   }
   if (name.includes("DT") || (num & 64) !== 0) {
-    return { rate: 1.5, modText: "DT (1.5x)" };
+    return { rate: 1.5, label: "DT", type: "dt" };
   }
+
+  // Check HT / DC
   if (name.includes("DC")) {
-    return { rate: 0.75, modText: "DC (0.75x)" };
+    return { rate: 0.75, label: "DC", type: "ht" };
   }
   if (name.includes("HT") || (num & 256) !== 0) {
-    return { rate: 0.75, modText: "HT (0.75x)" };
+    return { rate: 0.75, label: "HT", type: "ht" };
   }
 
   // 3. Lazer mod array inspection
@@ -213,16 +231,16 @@ function extractRateAndMods(data) {
   for (const m of modArray) {
     const acronym = String(m?.acronym || m || "").toUpperCase();
     const speedChange = Number(m?.settings?.speed_change);
-    if (Number.isFinite(speedChange) && speedChange > 0) {
-      return { rate: speedChange, modText: `${speedChange}x` };
+    if (acronym === "NC") return { rate: 1.5, label: "NC", type: "dt" };
+    if (acronym === "DT") return { rate: 1.5, label: "DT", type: "dt" };
+    if (acronym === "DC") return { rate: 0.75, label: "DC", type: "ht" };
+    if (acronym === "HT") return { rate: 0.75, label: "HT", type: "ht" };
+    if (Number.isFinite(speedChange) && speedChange > 0 && Math.abs(speedChange - 1.0) > 0.01) {
+      return { rate: speedChange, label: `${speedChange}x`, type: "rate" };
     }
-    if (acronym === "NC") return { rate: 1.5, modText: "NC (1.5x)" };
-    if (acronym === "DT") return { rate: 1.5, modText: "DT (1.5x)" };
-    if (acronym === "DC") return { rate: 0.75, modText: "DC (0.75x)" };
-    if (acronym === "HT") return { rate: 0.75, modText: "HT (0.75x)" };
   }
 
-  return { rate: 1.0, modText: "" };
+  return { rate: 1.0, label: "", type: "" };
 }
 
 // ── 6. Main Recompute Handler ───────────────────────────────────────────────
@@ -233,31 +251,24 @@ async function processCurrentBeatmap() {
 
   try {
     const osuText = await fetchActiveBeatmap();
-    const parsed = parseOsuBeatmap(osuText, currentRate);
+    const parsed = parseOsuBeatmap(osuText, currentRateInfo.rate);
 
     if (!parsed.is7KMania) {
       levelDisplay.textContent = "--";
-      if (rateBadge) rateBadge.hidden = true;
+      updateRateBadge({ rate: 1.0, label: "", type: "" });
       updateStatus(`Non-7K (${parsed.circleSize}K)`, "idle");
       return;
     }
 
     if (parsed.error) {
       levelDisplay.textContent = "--";
-      if (rateBadge) rateBadge.hidden = true;
+      updateRateBadge({ rate: 1.0, label: "", type: "" });
       updateStatus(parsed.error, "warning");
       return;
     }
 
-    // Update rate badge
-    if (rateBadge) {
-      if (Math.abs(currentRate - 1.0) > 0.01) {
-        rateBadge.textContent = currentModText || `${currentRate.toFixed(2)}x`;
-        rateBadge.hidden = false;
-      } else {
-        rateBadge.hidden = true;
-      }
-    }
+    // Sync rate badge (DT / HT / None)
+    updateRateBadge(currentRateInfo);
 
     updateStatus("Predicting...", "loading");
     const predResult = await runPrediction(parsed);
@@ -269,9 +280,9 @@ async function processCurrentBeatmap() {
       void levelDisplay.offsetWidth;
       levelDisplay.classList.add("pulse");
 
-      const rateInfo = Math.abs(currentRate - 1.0) > 0.01 ? ` [${currentModText}]` : "";
-      updateStatus(`7K${rateInfo} (${predResult.latencyMs}ms)`, "");
-      console.log(`[O2Jam Predictor] Level: ${predResult.level.toFixed(2)} (Round: ${roundedLevel}) @ rate ${currentRate}`);
+      const rateInfoText = currentRateInfo.label ? ` [${currentRateInfo.label}]` : "";
+      updateStatus(`7K${rateInfoText} (${predResult.latencyMs}ms)`, "");
+      console.log(`[O2Jam Predictor] Level: ${predResult.level.toFixed(2)} (Round: ${roundedLevel}) @ rate ${currentRateInfo.rate}`);
     }
   } catch (err) {
     console.error("[O2Jam Predictor] Error processing beatmap:", err);
@@ -307,16 +318,15 @@ function connectToTosu() {
       const title = bm?.title || "";
       const version = bm?.version || "";
 
-      const { rate, modText } = extractRateAndMods(data);
-      const processKey = `${md5 || id}:${title}:${version}@${rate.toFixed(2)}`;
+      const rateInfo = extractRateAndMods(data);
+      const processKey = `${md5 || id}:${title}:${version}@${rateInfo.rate.toFixed(2)}`;
 
       if (processKey === lastProcessedKey) {
         return;
       }
 
       lastProcessedKey = processKey;
-      currentRate = rate;
-      currentModText = modText;
+      currentRateInfo = rateInfo;
 
       processCurrentBeatmap();
     } catch (err) {
