@@ -93,6 +93,13 @@ For comprehensive technical specifications, explore the `docs/` directory:
 
 ---
 
+## Credits & Acknowledgments
+
+- **Chart Dataset:** Special thanks to the [O2Jam to osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975) by the osu! community for compiling and maintaining the DMJAM and O2EZ chart packs used to build our training dataset.
+- **Tosu:** Built to integrate with [Tosu](https://github.com/KotRikD/tosu) by KotRikD.
+
+---
+
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License
