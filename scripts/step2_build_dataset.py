@@ -148,7 +148,16 @@ def parse_ojn_file(file_path, folder_name):
             level = struct.unpack("<h", h[24:26])[0]  # HX level
             title = h[108:172].split(b"\x00")[0].decode("cp949", errors="ignore").strip()
             artist = h[172:204].split(b"\x00")[0].decode("cp949", errors="ignore").strip()
+            hard_off = struct.unpack("<i", h[292:296])[0]
             cover_off = struct.unpack("<i", h[296:300])[0]
+            file_len = os.path.getsize(file_path)
+
+            if hard_off < 300 or hard_off >= file_len:
+                hard_off = 300
+            if cover_off <= hard_off or cover_off > file_len:
+                cover_off = file_len
+
+            f.seek(hard_off)
             
             events = []
             while f.tell() < cover_off:
