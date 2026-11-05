@@ -1,30 +1,19 @@
 # O2Jam 7K Level Predictor
 
-An AI-powered difficulty estimator that predicts human-assigned **O2Jam difficulty levels (Lv. 15 to Lv. 185+)** for 7-key osu!mania and O2Jam charts directly from raw note timings.
+Predicts O2Jam difficulty levels (Lv. 4 to Lv. 180) for 7-key osu!mania charts using a neural network trained on ~4,400 O2Jam and community charts.
 
-Includes an **instant in-game HUD overlay extension** for [Tosu](https://github.com/KotRikD/tosu) powered by client-side WebAssembly ONNX inference, featuring real-time difficulty timeline graphs and native settings support.
-
----
-
-## Highlights
-
-- **Unified 4,044-Chart Dataset:** Cleanly isolated across classic DMJAM, modern NSJAM (`.ojn` binary parser with Hard package seek offsets), and O2EZ community scales.
-- **High Accuracy (Model v3):** **Validation MAE 5.51**, **Pearson $R = 0.970$**, with **50% of all charts predicted within $\le 3.69$ levels** (Core Lv. 50–80 MAE is **3.96**).
-- **Physical Biomechanical Kinematics:** 60-channel input representation modeling jack velocities, hold release-to-press gaps, pinned-finger tension, and hand-split roll alternation.
-- **Instantaneous Difficulty Timeline Graph:** Dual-output ONNX model (`predicted_level` and `strain_curve`) renders a live difficulty sparkline directly inside the Tosu HUD overlay with active playhead tracking.
-- **Tosu Native Settings Support:** Fully configurable from the Tosu Web Dashboard with live WebSocket synchronization (graph toggle, decimal precision, title visibility, overlay scale, opacity, and accent colors).
-- **Physical Rate Scaling (DT / HT):** Automatically compresses or expands note timing in real-time when Double Time (1.5x DT) or Half Time (0.75x HT) is toggled in osu!, displaying dedicated styled badges.
-- **Sub-15ms Inference:** Runs locally via [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) using SIMD-threaded WebAssembly with zero network calls.
-- **Compact Footprint:** Single 4.60 MB dual-output ONNX model (`model.onnx`).
+Includes a lightweight in-game overlay for [tosu](https://github.com/KotRikD/tosu) that displays the estimated level in real time while playing or browsing songs.
 
 ---
 
-## Quickstart: Tosu In-Game Overlay
+## tosu In-Game Overlay
 
 No Python or machine learning setup required.
 
-1. **Download:** Grab the latest `o2jam_level_predictor.zip` from [GitHub Releases](https://github.com/Huy317/o2jam-level-calc/releases).
-2. **Install:** Extract the folder directly into your Tosu `static/` directory:
+### Setup
+
+1. Download `o2jam_level_predictor.zip` from [GitHub Releases](https://github.com/Huy317/o2jam-level-calc/releases) (or grab the `extension/o2jam_level_predictor` folder directly from this repo).
+2. Extract the folder into your tosu `static/` directory:
    ```
    tosu/
    └── static/
@@ -36,26 +25,68 @@ No Python or machine learning setup required.
            ├── settings.json
            └── ...
    ```
-3. **Launch:** Start Tosu and osu!. Open `http://127.0.0.1:24050/o2jam_level_predictor/` in your browser or enable it in Tosu's In-Game Overlay manager.
+3. Start tosu and osu!.
+4. Open `http://127.0.0.1:24050/o2jam_level_predictor/` in your browser, or add it as a browser source in OBS / tosu overlay manager.
+
+### Features
+
+- **Runs 100% locally:** Inferences run inside the browser using WebAssembly ONNX Runtime (`model.onnx`). No external server or API calls.
+- **Speed & mod aware:** Automatically adjusts predictions for Double Time (1.5x DT), Half Time (0.75x HT), or custom osu! rate multipliers.
+- **Low overhead:** Only recalculates when the beatmap or mod changes, keeping CPU usage minimal during gameplay.
+- **Configurable:** Toggle decimal precision, custom accent colors, scale, opacity, and song title from the tosu settings dashboard.
 
 ---
 
-## CLI Prediction
+## CLI Usage
 
-Predict the O2Jam level of any local 7K `.osu` file:
+You can also test local `.osu` charts from the command line:
 
 ```bash
 pip install -r requirements.txt
 python scripts/predict.py "path/to/chart.osu"
 ```
 
-Output:
+Example output:
+
+```text
+=========================================
+  Song Title : xi - FREEDOM DiVE
+  Difficulty : [FOUR DIMENSIONS]
+  Key Count  : 7K (Mode 3)
+  Notes      : 4,218 notes
+  Duration   : 254.2s (12,710 frames)
+-----------------------------------------
+  >>> Predicted O2Jam Level : Lv. 138.4 (Round: Lv. 138) <<<
+  Inference Latency         : 8.50 ms
+=========================================
 ```
-Loaded ONNX model: model.onnx
-Parsed Beatmap: xi - FREEDOM DiVE [FOUR DIMENSIONS]
-Mode: Mania 7K | Notes: 4,218 | Duration: 254.2s (NPS: 16.6)
-Predicted O2Jam Level: Lv. 138.4 (Rounded: Lv. 138)
-```
+
+---
+
+## How It Works
+
+Standard rhythm game star rating algorithms often struggle to capture O2Jam difficulty curves because O2Jam charts rely heavily on long-note density, asymmetric chord jacks, and prolonged stamina drain.
+
+This model bypasses traditional heuristics by learning directly from chart structure:
+
+1. **Note Grid Input:** The chart is converted into a discrete 20ms time-grid across all 7 columns, distinguishing taps, hold heads, hold bodies, and releases.
+2. **Convolutional Kinematics:** 1D convolutions extract local pattern density, hand alternation, and jack intervals across multiple receptive fields.
+3. **Temporal Pooling:** Combines short burst intensity, sustained climax phrases, and overall stamina drop-off into a final bounded rating.
+4. **Clean Dataset:** Trained on 4,423 deduplicated O2Jam charts (DMJAM, NSJAM, O2EZ, and private server archives), filtered to eliminate dummy labels and corrupt files.
+
+### Benchmark Summary
+
+Tested across all 4,423 clean charts:
+
+| Metric | Result |
+| :--- | :--- |
+| **Pearson Correlation ($R$)** | **0.9785** |
+| **Median Absolute Error (P50)** | **$\le 3.67$ levels** |
+| **75th Percentile Error (P75)** | **$\le 6.88$ levels** |
+| **Mean Absolute Error (MAE)** | **5.34 levels** |
+| **Overall RMSE** | **7.85 levels** |
+
+Detailed tier breakdowns and outlier evaluations are documented in [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ---
 
@@ -64,23 +95,19 @@ Predicted O2Jam Level: Lv. 138.4 (Rounded: Lv. 138)
 ```
 o2jam-level-calc/
 ├── docs/                      # Technical documentation & benchmarks
-│   ├── overview.md            # High-level architecture & pipeline workflow
-│   ├── architecture.md        # 60 kinematic channels, receptive field & sorted decay
-│   ├── dataset.md             # Data sources, binary .ojn parser & deduplication
-│   ├── benchmarks.md          # Validation metrics, percentiles & tier accuracy
-│   └── extension.md           # Tosu overlay setup, WASM runtime, strain graph & settings
-├── scripts/                   # Pipeline & diagnostics tools
-│   ├── step1_inspect.py       # Scans and validates charts
-│   ├── step2_build_dataset.py # Builds discrete (T, 7) grids from .osu and .ojn
-│   ├── step3_train.py         # PyTorch training & ONNX export
-│   ├── predict.py             # CLI single-chart inference
-│   ├── analyze_errors.py      # PyTorch model validation analysis
-│   └── analyze_errors_onnx.py # Production ONNX benchmark suite
-├── extension/                 # Standalone Tosu static overlay package
-│   └── o2jam_level_predictor/ # Ready to deploy into tosu/static/
-├── data/                      # Dataset arrays & metadata
-├── model.onnx                 # Production ONNX model (4.60 MB)
-├── best_model.pt              # PyTorch trained checkpoint
+│   ├── overview.md            # System architecture and data pipeline
+│   ├── architecture.md        # Neural network layers and strain channels
+│   ├── dataset.md             # Data sources, binary .ojn parsing & deduplication
+│   └── benchmarks.md          # Benchmark results and error breakdowns
+├── scripts/                   # Training and analysis scripts
+│   ├── step1_inspect.py       # Scans and validates input charts
+│   ├── step2_build_dataset.py # Generates numpy arrays from .osu and .ojn
+│   ├── step3_train.py         # PyTorch training and ONNX export
+│   ├── predict.py             # CLI single-chart predictor
+│   └── analyze_errors_onnx.py # Full ONNX benchmark suite
+├── extension/                 # Standalone tosu static overlay
+│   └── o2jam_level_predictor/ # Ready to drop into tosu/static/
+├── model.onnx                 # Production ONNX model
 └── requirements.txt
 ```
 
@@ -88,17 +115,15 @@ o2jam-level-calc/
 
 ## Documentation
 
-For comprehensive technical specifications, explore the `docs/` directory:
-- [Overview & Architecture Workflow](docs/overview.md)
-- [Neural Network Architecture & Biomechanical Kinematics](docs/architecture.md)
-- [Dataset Specifications & Native Binary .ojn Decoding](docs/dataset.md)
-- [Benchmarks, Percentiles & Tier Analysis](docs/benchmarks.md)
-- [Tosu Extension Integration, Graph & Settings](docs/extension.md)
+- [Overview & Pipeline](docs/overview.md)
+- [Model Architecture](docs/architecture.md)
+- [Dataset & Deduplication](docs/dataset.md)
+- [Benchmarks & Error Analysis](docs/benchmarks.md)
 
 ---
 
-## Credits
+## Acknowledgments
 
-- [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975): DMJAM and O2EZ chart packs.
-- [o2jam-to-osu](https://github.com/LuzianU/o2jam-to-osu): Reference for `.ojn` binary chart decoding.
-- [Tosu](https://github.com/KotRikD/tosu): Overlay platform and memory reader.
+- [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975) for community chart archives.
+- [o2jam-to-osu](https://github.com/LuzianU/o2jam-to-osu) for `.ojn` binary format reference.
+- [tosu](https://github.com/KotRikD/tosu) for the memory reading and overlay platform.
