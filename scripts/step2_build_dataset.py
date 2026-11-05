@@ -1,6 +1,7 @@
 """
-Step 2: Unified O2Jam Dataset Builder (osu!mania converts + NSJAM .ojn native charts).
+Step 2: Unified O2Jam Dataset Builder (osu!mania converts + Private Server + NSJAM native charts).
 Parses 7K .osu charts and binary .ojn charts into discrete (T, 7) uint8 grids.
+Robust fuzzy deduplication by note count, duration tolerance (+-2s), and title/hash.
 
 Outputs:
   - data/o2jam_dataset.npz (packed flat uint8 grids, offsets, lengths, levels)
@@ -28,6 +29,26 @@ NSJAM_DIRS = {
     "NSM04_LN": os.path.join(NSJAM_BASE, "NSM04"),
 }
 
+def find_private_server_dir():
+    env_dir = os.environ.get("PRIVATE_SERVER_DIR")
+    if env_dir and os.path.exists(env_dir):
+        return env_dir
+    games_base = r"D:\Games"
+    if os.path.exists(games_base):
+        for entry in os.listdir(games_base):
+            cand = os.path.join(games_base, entry)
+            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, "DSong")):
+                return cand
+    return ""
+
+PRIVATE_SERVER_BASE = find_private_server_dir()
+PRIVATE_SERVER_DIRS = {
+    "DSong": os.path.join(PRIVATE_SERVER_BASE, "DSong"),
+    "ESong": os.path.join(PRIVATE_SERVER_BASE, "ESong"),
+    "HSong": os.path.join(PRIVATE_SERVER_BASE, "HSong"),
+    "NSong": os.path.join(PRIVATE_SERVER_BASE, "NSong"),
+}
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUTPUT_DIR = os.path.join(REPO_ROOT, "data")
 OUTPUT_NPZ = os.path.join(OUTPUT_DIR, "o2jam_dataset.npz")
@@ -38,10 +59,11 @@ MAX_FRAMES_CAP = 25000  # Safety cap: 500 seconds
 LEVEL_REGEX = re.compile(r"\[(\d+)\]\s*$")
 DMJAM_TAGS = {"[D]", "[H]", "[N]", "[E]"}
 
-# Priority: DMJAM (0) > NSJAM (1) > O2EZ (2)
-PRIORITY_DMJAM = 0
-PRIORITY_NSJAM = 1
-PRIORITY_O2EZ = 2
+# Priority: Native Private Server (0) > osu! DMJAM converts (1) > NSJAM (2) > O2EZ converts (3)
+PRIORITY_PRIVATE = 0
+PRIORITY_DMJAM = 1
+PRIORITY_NSJAM = 2
+PRIORITY_O2EZ = 3
 
 
 # ── 1. .osu Beatmap Parser ──────────────────────────────────────────────────
@@ -136,7 +158,7 @@ def parse_osu_file(file_path):
 
 
 # ── 2. Native .ojn Binary Parser ────────────────────────────────────────────
-def parse_ojn_file(file_path, folder_name):
+def parse_ojn_file(file_path, folder_name, source_type="nsjam", priority=PRIORITY_NSJAM):
     try:
         with open(file_path, "rb") as f:
             h = f.read(300)
@@ -247,14 +269,14 @@ def parse_ojn_file(file_path, folder_name):
             song_title = f"{artist} - {title}".strip(" -") if artist else title
 
             return {
-                "source_type": "nsjam",
+                "source_type": source_type,
                 "file_path": file_path,
                 "folder": folder_name,
                 "file_name": os.path.basename(file_path),
                 "title": song_title,
-                "version": f"[NSJAM] [{folder_name}] [{level}]",
+                "version": f"[{source_type.upper()}] [{folder_name}] [{level}]",
                 "level": level,
-                "priority": PRIORITY_NSJAM,
+                "priority": priority,
                 "note_count": len(hit_objects),
                 "duration_ms": duration_ms,
                 "frames": t_frames,
@@ -265,10 +287,42 @@ def parse_ojn_file(file_path, folder_name):
         return None
 
 
+def clean_tokens(title):
+    tokens = set(re.findall(r"[a-zA-Z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+", title.lower()))
+    tokens.difference_update({"o2jam", "o2", "ver", "mix", "shd", "hd", "nm", "ez", "hard", "easy", "normal", "original"})
+    return tokens
+
+
+def are_charts_duplicate(c1, c2):
+    # 1. Exact bitwise grid hash match
+    if c1["grid_hash"] == c2["grid_hash"]:
+        return True
+
+    # 2. Must have identical note count
+    if c1["note_count"] != c2["note_count"]:
+        return False
+
+    # 3. Must have very close duration (within 2 seconds = 100 frames)
+    if abs(c1["duration_ms"] - c2["duration_ms"]) > 2000:
+        return False
+
+    # 4. Check title token overlap
+    tok1 = clean_tokens(c1["title"])
+    tok2 = clean_tokens(c2["title"])
+    if tok1 and tok2 and (tok1 & tok2):
+        return True
+
+    # 5. Fallback: identical level rating and very tight duration tolerance (0.5s)
+    if c1["level"] == c2["level"] and abs(c1["duration_ms"] - c2["duration_ms"]) <= 500:
+        return True
+
+    return False
+
+
 # ── 3. Main Unified Pipeline ────────────────────────────────────────────────
 def main():
     start_time = time.time()
-    print("=== Step 2: Unified O2Jam Dataset Generation (osu! + NSJAM) ===")
+    print("=== Step 2: Unified O2Jam Dataset Generation (osu! + Private + NSJAM) ===")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     all_charts = []
@@ -291,7 +345,22 @@ def main():
                 parsed_osu += 1
         print(f"  Successfully parsed {parsed_osu} valid 7K charts from osu!.")
 
-    # 2. Scan NSJAM Folders
+    # 2. Scan Private Server Folders (Native .ojn)
+    for folder_name, folder_path in PRIVATE_SERVER_DIRS.items():
+        if not os.path.exists(folder_path):
+            print(f"Skipping {folder_name}: directory not found ({folder_path})")
+            continue
+        ojn_files = [f for f in os.listdir(folder_path) if f.startswith("o2ma") and f.lower().endswith(".ojn")]
+        print(f"Scanning {folder_name}: {len(ojn_files)} .ojn files...")
+        parsed_priv = 0
+        for fn in ojn_files:
+            c = parse_ojn_file(os.path.join(folder_path, fn), folder_name, source_type="private", priority=PRIORITY_PRIVATE)
+            if c:
+                all_charts.append(c)
+                parsed_priv += 1
+        print(f"  Successfully parsed {parsed_priv} valid charts from {folder_name}.")
+
+    # 3. Scan NSJAM Folders (Native .ojn)
     for folder_name, folder_path in NSJAM_DIRS.items():
         if not os.path.exists(folder_path):
             print(f"Skipping {folder_name}: directory not found ({folder_path})")
@@ -300,7 +369,7 @@ def main():
         print(f"Scanning {folder_name}: {len(ojn_files)} .ojn files...")
         parsed_nsjam = 0
         for fn in ojn_files:
-            c = parse_ojn_file(os.path.join(folder_path, fn), folder_name)
+            c = parse_ojn_file(os.path.join(folder_path, fn), folder_name, source_type="nsjam", priority=PRIORITY_NSJAM)
             if c:
                 all_charts.append(c)
                 parsed_nsjam += 1
@@ -308,33 +377,36 @@ def main():
 
     print(f"\nTotal candidate charts parsed across all sources: {len(all_charts):,}")
 
-    # 3. Deduplication via Exact Grid Hash & Priority
-    # Priority: DMJAM (0) > NSJAM (1) > O2EZ (2)
-    groups = {}
-    for c in all_charts:
-        groups.setdefault(c["grid_hash"], []).append(c)
-
-    print(f"Total unique note patterns (grid hashes): {len(groups):,}")
+    # 4. Robust Deduplication by Note Count, Duration, and Title / Hash
+    print(f"\nRunning robust deduplication across {len(all_charts):,} candidates...")
+    all_charts.sort(key=lambda c: (c["priority"], -c["duration_ms"]))
 
     unique_charts = []
     discarded_duplicates = 0
-    priority_counts = {PRIORITY_DMJAM: 0, PRIORITY_NSJAM: 0, PRIORITY_O2EZ: 0}
+    priority_counts = {PRIORITY_PRIVATE: 0, PRIORITY_DMJAM: 0, PRIORITY_NSJAM: 0, PRIORITY_O2EZ: 0}
 
-    for gh, chart_list in groups.items():
-        chart_list.sort(key=lambda c: c["priority"])
-        chosen = chart_list[0]
-        unique_charts.append(chosen)
-        priority_counts[chosen["priority"]] += 1
-        if len(chart_list) > 1:
-            discarded_duplicates += len(chart_list) - 1
+    by_notes = {}
+    for c in all_charts:
+        candidates = by_notes.setdefault(c["note_count"], [])
+        is_dup = False
+        for existing in candidates:
+            if are_charts_duplicate(c, existing):
+                is_dup = True
+                discarded_duplicates += 1
+                break
+        if not is_dup:
+            candidates.append(c)
+            unique_charts.append(c)
+            priority_counts[c["priority"]] += 1
 
     print(f"Deduplication complete:")
     print(f"  Retained unique charts: {len(unique_charts):,}")
     print(f"  Discarded duplicates:   {discarded_duplicates:,}")
     print(f"  Source breakdown:")
-    print(f"    - DMJAM Server ([D],[H],[N],[E]): {priority_counts[PRIORITY_DMJAM]:,} charts")
-    print(f"    - NSJAM Server (NSM01..NSM04):     {priority_counts[PRIORITY_NSJAM]:,} charts")
-    print(f"    - O2EZ Server ([O2EZ]):           {priority_counts[PRIORITY_O2EZ]:,} charts")
+    print(f"    - Private Server Native:           {priority_counts[PRIORITY_PRIVATE]:,} charts")
+    print(f"    - osu! DMJAM Server ([D],[H]...):  {priority_counts[PRIORITY_DMJAM]:,} charts")
+    print(f"    - NSJAM Native Server:             {priority_counts[PRIORITY_NSJAM]:,} charts")
+    print(f"    - osu! O2EZ Server ([O2EZ]):       {priority_counts[PRIORITY_O2EZ]:,} charts")
 
     # 4. Pack into zero-copy continuous uint8 array
     print(f"\nPacking {len(unique_charts):,} charts into zero-copy NumPy archive...")

@@ -2,14 +2,15 @@
 
 ## 1. Data Sources & Composition
 
-The training dataset integrates **4,044 unique 7-key charts** across three major O2Jam server rating systems:
+The training dataset integrates **4,438 unique 7-key charts** across four major O2Jam server rating systems, with uncompressed native `.ojn` files taking highest priority:
 
 | Source | File Format | Role / Server Context | Unique Charts |
-| :--- | :--- | :--- | :--- |
-| **DMJAM** | `.osu` converts | Official / classic competitive server scales (`[E]`, `[N]`, `[H]`, `[D]`) | 1,861 |
-| **NSJAM** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,487 |
-| **O2EZ** | `.osu` converts | O2EZ community modern re-ratings (`[O2EZ]`) | 696 |
-| **Total** | — | **Deduplicated Unified Dataset** | **4,044** |
+| :--- | :--- | :--- | :---: |
+| **Private Server Native** | `.ojn` native binary | Uncorrupted master charts from community channels (`DSong`, `ESong`, `HSong`, `NSong`) | 2,381 |
+| **NSJAM Native** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,227 |
+| **osu! O2EZ** | `.osu` converts | O2EZ community modern re-ratings (`[O2EZ]`) | 425 |
+| **osu! DMJAM** | `.osu` converts | Legacy converts of DMJAM charts (`[E]`, `[N]`, `[H]`, `[D]`) | 405 |
+| **Total** | — | **Deduplicated Unified Dataset** | **4,438** |
 
 ### Credits
 - DMJAM & O2EZ charts provided by the [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975).
@@ -50,17 +51,15 @@ Hold notes are paired by matching opening `0x02` events with their succeeding `0
 
 ---
 
-## 3. Deduplication & Priority Rules
+## 3. Robust Deduplication & Priority Rules
 
-Many charts exist across multiple servers under different rating iterations. To prevent identical note patterns from entering both training and validation sets:
-1. Every chart is hashed using its exact quantized note sequence:
-   $$\text{Hash} = \text{MD5}(\text{grid}[0 \dots T \times 7])$$
-2. Duplicate collisions are resolved strictly by server authority:
-   $$\text{DMJAM (Priority 0)} > \text{NSJAM (Priority 1)} > \text{O2EZ (Priority 2)}$$
-
-### Cross-Server Level Consistency Audit:
-- **DMJAM vs NSJAM Overlaps:** 81 chart overlaps identified. **70.4% share the exact identical integer level**, and **79.0% are within $\pm 2$ levels**. This statistically confirmed that NSJAM grades on the identical scale as classic DMJAM.
-- **O2EZ Overlaps:** Prioritizing NSJAM over O2EZ replaced 119 legacy community re-rates with verified NSJAM ratings.
+Many charts exist across multiple servers under different rating iterations. To prevent identical or converter-shifted note patterns from entering both training and validation sets:
+1. **Multi-Factor Deduplication Check:**
+   - **Bitwise match:** $\text{Hash}_1 == \text{Hash}_2$ (exact MD5 match of the 50 FPS quantized note grid).
+   - **Converter-shift tolerance:** Identical note count ($\text{Notes}_1 == \text{Notes}_2$) + duration tolerance ($|\Delta t| \le 2.0\text{s}$) + title token overlap or matching level rating. This catches converter artifacts where 1 or 2 notes were quantized by 1 frame (20ms) across formats.
+2. **Duplicate collisions are resolved strictly by source authority:**
+   $$\text{Private Server Native (0)} > \text{osu! DMJAM (1)} > \text{NSJAM Native (2)} > \text{osu! O2EZ (3)}$$
+   Uncorrupted native `.ojn` files always take precedence over text-converted `.osu` files.
 
 ---
 
@@ -73,4 +72,4 @@ For maximum GPU loading throughput, charts are packed into a single contiguous 1
 - `levels`: `float32` target difficulty levels.
 - `durations`: `int32` song durations in milliseconds.
 
-Total uncompressed size: **~18.9 MB**, allowing instantaneous zero-copy memory-mapped loading in PyTorch.
+Total uncompressed size: **~20.4 MB**, allowing instantaneous zero-copy memory-mapped loading in PyTorch.

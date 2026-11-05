@@ -1,5 +1,5 @@
 """
-Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,044 charts).
+Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,438 charts).
 Architecture:
   - 60 input channels (35 one-hot states + 2 counts + 23 kinematic channels)
   - 6 Residual Conv1D blocks (dilations 1, 2, 4, 8, 16, 32) -> ~5.06s receptive field
