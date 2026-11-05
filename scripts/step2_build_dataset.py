@@ -113,7 +113,7 @@ def parse_osu_file(file_path):
         return None
 
     level = int(match.group(1))
-    if level <= 1 or len(hit_objects) < 20:
+    if level <= 3 or len(hit_objects) < 20:
         return None
 
     priority = PRIORITY_DMJAM if any(tag in version_line for tag in DMJAM_TAGS) else PRIORITY_O2EZ
@@ -244,7 +244,7 @@ def parse_ojn_file(file_path, folder_name, source_type="nsjam", priority=PRIORIT
             for col, starts in pending_holds.items():
                 for s in starts: hit_objects.append((s, s, col))
 
-            if len(hit_objects) < 20 or level <= 1:
+            if len(hit_objects) < 20 or level <= 3:
                 return None
 
             hit_objects.sort(key=lambda o: (o[0], o[1], o[2]))
