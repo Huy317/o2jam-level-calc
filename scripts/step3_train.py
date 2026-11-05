@@ -1,11 +1,11 @@
 """
-Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,055 charts).
+Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,044 charts).
 Architecture:
-  - 37 input channels (35 one-hot states + 1 chord attack count + 1 hold count)
+  - 60 input channels (35 one-hot states + 2 counts + 23 kinematic channels)
   - 6 Residual Conv1D blocks (dilations 1, 2, 4, 8, 16, 32) -> ~5.06s receptive field
-  - Multi-scale temporal pooling (1s micro-burst, 5s phrase, 15s climax, global average stamina, attention)
-  - Smooth sigmoid bounded output [15.0, 185.0]
-  - Tier-weighted + Asymmetric Huber loss
+  - Multi-scale temporal pooling (5s phrase, 15s climax, global average stamina, attention, strain stats)
+  - Smooth sigmoid bounded output [1.0, 185.0]
+  - Symmetric Huber loss
 """
 
 import json
@@ -73,6 +73,23 @@ class O2JamDataset(Dataset):
         return torch.from_numpy(grid), torch.tensor(level, dtype=torch.float32)
 
 
+class LengthBucketSampler(torch.utils.data.Sampler):
+    def __init__(self, chart_lengths, batch_size=BATCH_SIZE, shuffle=True):
+        self.indices = sorted(range(len(chart_lengths)), key=lambda i: chart_lengths[i])
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        batches = [self.indices[i:i + self.batch_size] for i in range(0, len(self.indices), self.batch_size)]
+        if self.shuffle:
+            random.shuffle(batches)
+        for b in batches:
+            yield b
+
+    def __len__(self):
+        return (len(self.indices) + self.batch_size - 1) // self.batch_size
+
+
 def collate_fn(batch):
     grids, levels = zip(*batch)
     lengths = [g.shape[0] for g in grids]
@@ -80,11 +97,13 @@ def collate_fn(batch):
 
     batch_size = len(grids)
     padded = torch.zeros((batch_size, max_len, 7), dtype=torch.uint8)
+    mask = torch.zeros((batch_size, 1, max_len), dtype=torch.float32)
     for i, g in enumerate(grids):
         padded[i, :g.shape[0], :] = g
+        mask[i, 0, :g.shape[0]] = 1.0
 
     levels_tensor = torch.stack(levels)
-    return padded, levels_tensor
+    return padded, levels_tensor, mask
 
 
 class ResidualBlock1D(nn.Module):
@@ -132,9 +151,9 @@ class O2JamLevelPredictor(nn.Module):
             nn.Conv1d(32, 1, kernel_size=1),
         )
 
-        # Head: Multi-Scale Latent (640) + Sorted Decay Strain Features (5) = 645
+        # Head: Multi-Scale Latent (512) + Strain Features (2) = 514
         self.head = nn.Sequential(
-            nn.Linear(channels * 5 + 5, 256),
+            nn.Linear(channels * 4 + 2, 256),
             nn.GELU(),
             nn.Dropout(0.2),
             nn.Linear(256, 128),
@@ -149,7 +168,7 @@ class O2JamLevelPredictor(nn.Module):
         k_hand = torch.tensor([0.5, 1.0], dtype=torch.float32).view(1, 1, 2)
         self.register_buffer('hand_kernel', k_hand)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         # x: (Batch, T, 7) uint8 categorical integers [0..4]
         b, t, _ = x.shape
 
@@ -199,32 +218,32 @@ class O2JamLevelPredictor(nn.Module):
         feat = self.block6(feat)
 
         # Multi-scale temporal pooling on latent features
-        p1 = F.avg_pool1d(feat, kernel_size=50, stride=10, padding=25).amax(dim=-1)
         p5 = F.avg_pool1d(feat, kernel_size=250, stride=25, padding=125).amax(dim=-1)
         p15 = F.avg_pool1d(feat, kernel_size=750, stride=50, padding=375).amax(dim=-1)
-        gap = feat.mean(dim=-1)
-        attn_w = torch.softmax(self.attn_conv(feat), dim=-1)
-        attn_pool = (feat * attn_w).sum(dim=-1)
 
         # Instantaneous 1D strain curve (positive scalar strain)
         s_raw = F.softplus(self.strain_conv(feat))  # (B, 1, T)
-        # 0.5s windows (25 frames, stride 12 frames)
-        s_win = F.avg_pool1d(s_raw, kernel_size=25, stride=12).squeeze(1)  # (B, K)
-        s_sorted, _ = torch.sort(s_win, dim=-1, descending=True)
+        s_max = s_raw.amax(dim=-1)                  # (B, 1) peak strain
 
-        top1 = s_sorted[:, 0:1]
-        top3 = s_sorted[:, :3].mean(dim=-1, keepdim=True)
-        top10 = s_sorted[:, :10].mean(dim=-1, keepdim=True)
-        top30 = s_sorted[:, :30].mean(dim=-1, keepdim=True)
-        s_mean = s_win.mean(dim=-1, keepdim=True)
+        if mask is None:
+            gap = feat.mean(dim=-1)
+            attn_w = torch.softmax(self.attn_conv(feat), dim=-1)
+            attn_pool = (feat * attn_w).sum(dim=-1)
+            s_mean = s_raw.mean(dim=-1)
+        else:
+            # Mask out padding to compute exact unpadded stamina and attention
+            mask_sum = mask.sum(dim=-1).clamp(min=1.0)
+            gap = (feat * mask).sum(dim=-1) / mask_sum
+            attn_logits = self.attn_conv(feat).masked_fill(mask == 0, -1e4)
+            attn_w = torch.softmax(attn_logits, dim=-1)
+            attn_pool = (feat * attn_w).sum(dim=-1)
+            s_mean = (s_raw * mask).sum(dim=-1) / mask_sum
 
-        strain_feats = torch.cat([top1, top3, top10, top30, s_mean], dim=-1)  # (B, 5)
-
-        pooled = torch.cat([p1, p5, p15, gap, attn_pool, strain_feats], dim=-1)
+        pooled = torch.cat([p5, p15, gap, attn_pool, s_max, s_mean], dim=-1)
         raw = self.head(pooled).squeeze(-1)
 
-        # Smooth Softplus lower-bounded at Lv. 15.0 (eliminates high-level saturation shelf)
-        level = 15.0 + F.softplus(raw)
+        # Bounded sigmoid [1.0, 185.0] covering entire O2Jam human spectrum without runaway inflation
+        level = 1.0 + 184.0 * torch.sigmoid(raw)
 
         # 1-second downsampled strain curve for HUD timeline visualization
         strain_timeline = F.avg_pool1d(s_raw, kernel_size=50, stride=50).squeeze(1)
@@ -237,10 +256,10 @@ def evaluate(model, loader, device):
     all_targets = []
 
     with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
+        for x, y, mask in loader:
+            x, y, mask = x.to(device), y.to(device), mask.to(device)
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                pred, _ = model(x)
+                pred, _ = model(x, mask)
             all_preds.extend(pred.cpu().numpy().tolist())
             all_targets.extend(y.cpu().numpy().tolist())
 
@@ -276,8 +295,13 @@ def train():
     train_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, train_indices, augment=True)
     val_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, val_indices, augment=False)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0, pin_memory=True)
+    train_lengths = [lengths[i] for i in train_indices]
+    val_lengths = [lengths[i] for i in val_indices]
+    train_sampler = LengthBucketSampler(train_lengths, batch_size=BATCH_SIZE, shuffle=True)
+    val_sampler = LengthBucketSampler(val_lengths, batch_size=BATCH_SIZE, shuffle=False)
+
+    train_loader = DataLoader(train_dataset, batch_sampler=train_sampler, collate_fn=collate_fn, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_sampler=val_sampler, collate_fn=collate_fn, num_workers=0, pin_memory=True)
 
     model = O2JamLevelPredictor(channels=128).to(device)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -295,19 +319,13 @@ def train():
         total_loss = 0.0
         n_batches = 0
 
-        for x, y in train_loader:
-            x, y = x.to(device), y.to(device)
+        for x, y, mask in train_loader:
+            x, y, mask = x.to(device), y.to(device), mask.to(device)
             optimizer.zero_grad()
 
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                pred, _ = model(x)
-                # Tier-weighted Huber loss with mild asymmetry on elite charts (Lv. 120+)
-                tier_weights = torch.ones_like(y)
-                tier_weights = torch.where(y > 110, 1.4, tier_weights)
-                tier_weights = torch.where(y > 140, 1.8, tier_weights)
-                asym_weights = torch.where((pred < y) & (y > 120), 1.15, 1.0)
-                loss_elements = F.smooth_l1_loss(pred, y, reduction="none", beta=1.0)
-                loss = (tier_weights * asym_weights * loss_elements).mean()
+                pred, _ = model(x, mask)
+                loss = F.smooth_l1_loss(pred, y, reduction="mean", beta=1.0)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)

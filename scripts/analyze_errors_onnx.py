@@ -1,5 +1,9 @@
 import json
 import os
+import sys
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import time
 import numpy as np
 import onnxruntime as ort
@@ -107,7 +111,9 @@ def main():
         err = signed_errors[idx]
         dur_s = m["duration_ms"] / 1000.0
         nps = m["note_count"] / max(1.0, dur_s)
-        print(f"Lv.{actual:3.0f}  | Lv.{pred:5.1f} | {err:+6.1f} | {dur_s:5.1f}s | {nps:4.1f} | {m['version'][:22]:<22} | {m['title'][:30]}")
+        v_str = m['version'][:22].encode('ascii', errors='replace').decode('ascii')
+        t_str = m['title'][:30].encode('ascii', errors='replace').decode('ascii')
+        print(f"Lv.{actual:3.0f}  | Lv.{pred:5.1f} | {err:+6.1f} | {dur_s:5.1f}s | {nps:4.1f} | {v_str:<22} | {t_str}")
 
 if __name__ == "__main__":
     main()

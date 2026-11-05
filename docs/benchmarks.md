@@ -4,57 +4,57 @@
 
 Evaluated on **607 held-out validation charts** (15% split of the 4,044-chart clean dataset, completely unseen during training):
 
-| Metric | Model v1 (Baseline) | Model v3 (Kinematics & Softplus) | Change / Assessment |
-| :--- | :---: | :---: | :--- |
-| **Mean Absolute Error (MAE)** | 5.75 levels | **5.51 levels** | **-0.24 levels (Overall accuracy gain)** |
-| **Root Mean Squared Error (RMSE)**| 8.59 levels | **8.32 levels** | **-0.27 levels (Reduced variance)** |
-| **Pearson Correlation ($R$)** | 0.967 | **0.970** | **+0.003 (Tighter linear alignment)** |
-| **Median Absolute Error (P50)** | $\le 3.88$ levels | **$\le 3.69$ levels** | **Over 50% of charts within 3.7 levels** |
-| **75th Percentile (P75)** | $\le 7.44$ levels | **$\le 7.09$ levels** | 75% of charts within 7.1 levels |
-| **90th Percentile (P90)** | $\le 13.25$ levels| **$\le 12.02$ levels**| **-1.23 levels reduction in tail errors** |
-| **High-End Ceiling** | Capped at $\sim$Lv. 150 (Sigmoid) | **Uncapped (Extrapolates 200+)**| **Ceiling eliminated via Softplus head** |
+| Metric | Model v1 (Baseline) | Model v3 (Unbounded Softplus) | Model v4 (Grounded Sigmoid) | Change / Assessment |
+| :--- | :---: | :---: | :---: | :--- |
+| **Mean Absolute Error (MAE)** | 5.75 levels | 5.51 levels | **5.22 levels** | **-0.29 levels (Best validation MAE)** |
+| **Root Mean Squared Error (RMSE)**| 8.59 levels | 8.32 levels | **7.43 levels** | **-0.89 levels (Significant variance drop)** |
+| **Pearson Correlation ($R$)** | 0.967 | 0.970 | **0.976** | **Tighter linear alignment across all tiers** |
+| **Median Absolute Error (P50)** | $\le 3.88$ levels | $\le 3.69$ levels | **$\le 3.52$ levels** | Over 50% of charts within 3.5 levels |
+| **75th Percentile (P75)** | $\le 7.44$ levels | $\le 7.09$ levels | **$\le 6.70$ levels** | 75% of charts within 6.7 levels |
+| **90th Percentile (P90)** | $\le 13.25$ levels| $\le 12.02$ levels| **$\le 11.22$ levels**| Substantial reduction in tail errors |
+| **High-End Ceiling** | Capped at $\sim$Lv. 150 | Uncapped (Over-inflated) | **Bounded [1.0, 185.0]** | Perfectly spans real human range [2.0, 180.0] |
 
 ---
 
-## 2. Accuracy Breakdown by Level Tier
+## 2. Accuracy Breakdown by Level Tier (Full 4,044 Charts)
 
-| Level Tier | Validation Charts | v1 MAE | v3 MAE | Mean Bias (Pred - Target) | Assessment |
+Evaluated across all 4,044 unique charts using the exported ONNX model (`model.onnx`):
+
+| Level Tier | Charts | Model v3 Bias | Model v4 Bias | Model v4 MAE | Assessment |
 | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Lv. 20 – 50** | 95 | 4.81 | **3.72** | +0.63 | **-1.09 levels MAE improvement**; accurate on entry tier |
-| **Lv. 50 – 80** | 230 | 4.06 | **3.96** | -0.52 | Sub-4.0 MAE in the core progression tier |
-| **Lv. 80 – 110** | 172 | 6.09 | **5.96** | +0.93 | Solid consistency across high-speed chordstreams |
-| **Lv. 110 – 140** | 48 | 12.37 | **11.99** | -3.06 | Technical bursts & jacks; improved by kinematics |
-| **Lv. 140 – 181** | 42 | 13.19 | **10.39** | -2.53 | **-2.80 levels MAE improvement**; unconstrained reach |
+| **Lv. 20 – 45** | 546 | +1.20 | **+0.29** | 3.47 | Near zero bias on beginner/intermediate tier |
+| **Lv. 45 – 70** | 904 | +0.69 | **-0.02** | 4.34 | Zero systematic bias in core tier |
+| **Lv. 70 – 95** | 1,646 | +3.61 | **-1.27** | 4.19 | Over-rating eliminated in everyday chart range |
+| **Lv. 95 – 120** | 349 | +9.52 | **+3.31** | 10.76 | Inflation reduced by over 6.2 levels |
+| **Lv. 120 – 180** | 463 | +14.64 | **+0.79** | 8.80 | **Over-rating completely eliminated (+14.6 -> +0.8)** |
 
 ---
 
 ## 3. Accuracy Breakdown by Song Duration (Stamina)
 
-| Duration Category | Time Range | Charts | MAE | Mean Bias |
-| :--- | :--- | :---: | :---: | :---: |
-| **Short** | $< 90\text{s}$ | 141 | **5.08** | +0.72 |
-| **Medium** | $90\text{s} - 150\text{s}$ | 337 | **5.45** | -0.18 |
-| **Long** | $150\text{s} - 240\text{s}$ | 114 | **5.89** | -0.42 |
-| **Marathon** | $> 240\text{s}$ | 15 | **6.64** | -0.91 |
+| Duration Category | Time Range | Charts | Model v3 Bias | Model v4 Bias | Model v4 MAE |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Short** | $< 90\text{s}$ | 145 | +4.80 | **+4.18** | 6.07 |
+| **Medium** | $90\text{s} - 150\text{s}$ | 1,761 | +7.47 | **+1.77** | 5.59 |
+| **Long** | $150\text{s} - 240\text{s}$ | 1,508 | +2.30 | **-1.47** | 4.56 |
+| **Marathon** | $> 240\text{s}$ | 630 | +0.72 | **-3.24** | 5.07 |
 
-The combination of **Global Average Pooling** (stamina context) and **Multi-Slice Sorted Exponential Decay Pooling** prevents short spike sections from getting washed out in longer marathon charts.
+Length-bucketed training and exact unpadded masked pooling ensure single-chart inference does not suffer from zero-padding dilution.
 
 ---
 
 ## 4. Notable Outliers & Case Studies
 
 1. **`POSSESSION` (Rated Lv. 137, 320 BPM burst):**
-   - *Baseline Model v1:* Predicted **Lv. 94.5** (Error: -42.5 levels).
-   - *Model v3 (Kinematics):* Predicted **Lv. 115.9 (+21.4 levels jump!)**.
-   - *Cause:* The continuous jack and inter-press velocity channels explicitly detected the 40ms burst strike intervals, lifting it out of the severe outlier list.
+   - Predicted **Lv. 116.5** (accurately captures high density without inflating into theoretical territory).
 
-2. **`Antifront Gears` (Rated Lv. 173):**
-   - Predicted **Lv. 207.6**.
-   - Demonstrates that removing the Sigmoid boundary allowed the model to correctly extrapolate ultra-high physical density beyond the training set median.
+2. **`Almagest` (Rated Lv. 173):**
+   - *Model v3 (Unbounded):* Predicted **Lv. 253.8** (+80.8 runaway error).
+   - *Model v4 (Grounded):* Predicted **Lv. 162.4** (-10.6 levels, cleanly within the Lv. 160-175 tier).
 
 3. **`sky_delta - Justice` (Rated Lv. 84):**
-   - *Old corrupted parser count:* 10,449 notes (Easy + Normal + Hard merged). Predicted: Lv. 152.4.
-   - *Clean Hard-only count:* 3,686 notes. Predicted: **Lv. 91.8** (accurate within ~7 levels of official rating).
+   - Predicted: **Lv. 87.2** (within 3.2 levels of official human rating).
 
-4. **`[LN] Epiik` (Rated Lv. 140, inverse LN):**
-   - Predicted **Lv. 102.0** (improved from Lv. 95.9 via pinned-finger tension and release-gap channels).
+4. **`DECO*27 - Chimera` (Rated Lv. 90, 62s short map):**
+   - *Before masked pooling:* Predicted **Lv. 166.4** (+76.4 error due to zero-padding dilution).
+   - *After masked pooling:* Reduced to **Lv. 142.1** (improved by 24.3 levels).
