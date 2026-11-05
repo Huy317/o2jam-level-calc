@@ -1,26 +1,38 @@
 # Model Architecture & Design
 
-## 1. Input Representation (37 Channels)
+## 1. Input Representation (60 Kinematic Channels)
 
-Each beatmap is represented as a discrete 2D time grid $(T, 7)$ sampled at **$20\text{ms}$ steps ($50\text{ FPS}$)**, where $T$ is the number of time frames. At each 20ms step, every lane contains one of 5 categorical states:
+Each beatmap is accepted as a discrete 2D time grid $(T, 7)$ sampled at **$20\text{ms}$ steps ($50\text{ FPS}$)**, where $T$ is the number of time frames. At each 20ms step, every lane contains one of 5 categorical states:
 - `0`: Empty (no note active)
 - `1`: Tap Note (instantaneous strike)
 - `2`: Long Note Head (start of hold)
 - `3`: Long Note Body (ongoing hold)
 - `4`: Long Note Tail (release)
 
+To provide the model with explicit biomechanical and physical execution awareness while maintaining a compact `(B, T, 7)` uint8 input representation for WebAssembly inference, **60 continuous kinematic channels** are derived directly inside the PyTorch `forward()` pass:
+
 ```
-(T, 7) Grid (Values 0..4)
+Input Grid: (B, T, 7) uint8
   │
-  ├─> One-Hot Encoding: 7 lanes × 5 states = 35 channels
-  ├─> Channel 36: Attack Count (Number of new notes struck at frame t: states 1 or 2)
-  └─> Channel 37: Hold Count   (Number of active holds at frame t: states 2 or 3)
+  ├─> 1. Categorical One-Hot: 7 lanes × 5 states = 35 channels
+  ├─> 2. Macro Aggregate Channels:
+  │       • Attack Count (strikes at frame t: states 1 or 2) = 1 channel
+  │       • Hold Count   (active holds at frame t: states 2 or 3) = 1 channel
+  ├─> 3. Per-Lane Continuous Kinematic Channels:
+  │       • Jack Velocity: v_jack = min(1.0, 50ms / Δt_press) = 7 channels
+  │       • LN Release-to-Press Gap Velocity: v_gap = min(1.0, 50ms / Δt_gap) = 7 channels
+  │       • Pinned-Finger Tension: concurrent hold duration = 7 channels
+  └─> 4. Hand-Split Alternation Dynamics:
+          • Left Hand Delta (lanes 1–3) = 1 channel
+          • Right Hand Delta (lanes 5–7) = 1 channel
   │
   ▼
-Input Tensor: (B, 37, T)
+Expanded Feature Tensor: (B, 60, T)
 ```
 
-The explicit **Attack Count** and **Hold Count** channels allow early convolutional layers to immediately isolate chord densities (single, double, quad, full-chord) and hybrid LN complexity without requiring complex multi-lane cross-channel correlations.
+The continuous kinematic channels differentiate human mechanical strain:
+- A 320 BPM burst (40ms interval) produces high-velocity jack/roll values distinct from standard 160 BPM streams.
+- Pinned fingers during complex hold patterns are tracked explicitly, separating single-finger strain from free-hand multi-finger streams.
 
 ---
 
@@ -28,7 +40,7 @@ The explicit **Attack Count** and **Hold Count** channels allow early convolutio
 
 Difficulty in 7K rhythm games depends on both **micro-patterns** (trills, jacks, rolling staircases spanning 100ms - 500ms) and **macro-stamina** (dense 30 NPS chordstreams lasting 5 - 15 seconds).
 
-To capture both without downsampling time resolution, the network utilizes **6 Dilated Residual 1D Convolutional Blocks** with exponentially increasing dilation factors:
+To capture both without temporal downsampling, the network utilizes **6 Dilated Residual 1D Convolutional Blocks** with exponentially increasing dilation factors:
 
 | Block | Kernel Size ($K$) | Dilation ($d$) | Stride | Receptive Field Growth | Cumulative Context Window |
 | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -43,48 +55,44 @@ To capture both without downsampling time resolution, the network utilizes **6 D
 Each block consists of:
 $$\text{Conv1D}(d) \rightarrow \text{BatchNorm1d} \rightarrow \text{ReLU} \rightarrow \text{Dropout}(0.1) \rightarrow \text{Conv1D}(d) \rightarrow \text{BatchNorm1d} + \text{Residual}$$
 
-Total receptive field per frame is **253 frames $\approx 5.06$ seconds**, enough to recognize full musical phrases, chordstream transitions, and sustained anchor patterns.
+Total receptive field per frame is **253 frames $\approx 5.06$ seconds**, encompassing full musical phrases, chordstream transitions, and sustained anchor patterns.
 
 ---
 
-## 3. Multi-Scale Temporal Pooling
+## 3. Instantaneous Strain Curve Projection & Multi-Slice Decay Pooling
 
 Rhythm game charts cannot be judged purely by peak density or global averages:
-- A 3-minute chart with one 3-second Lv. 150 stream is not a Lv. 150 chart, nor is it a Lv. 50 chart.
+- A 3-minute chart with one 3-second Lv. 140 burst should not be diluted by calm intro/outro sections.
 - Human level ratings balance **sustained density** (stamina) with **peak bursts** (technical difficulty).
 
-The architecture computes **5 complementary temporal poolings** over the sequence $(B, C, T)$:
+### Instantaneous Strain Curve:
+Latent features are downsampled via 50-frame temporal max-pooling (1-second steps) and projected through a linear layer with ReLU activation:
+$$s(t) = \text{ReLU}(W_{\text{proj}} \cdot x_t + b_{\text{proj}}) \ge 0$$
+This generates the 1D difficulty timeline curve outputted directly by the ONNX model for real-time visualization.
 
-```
-Feature Sequence (B, 128, T)
-  ├── 1. Global Average Pooling (GAP)        --> (B, 128)  [Overall song stamina]
-  ├── 2. 1-Second Max-Pool (stride 250ms)    --> (B, 128)  [Micro-burst / spike intensity]
-  ├── 3. 5-Second Max-Pool (stride 1.25s)    --> (B, 128)  [Phrase-level sustained density]
-  ├── 4. 15-Second Max-Pool (stride 3.75s)   --> (B, 128)  [Climax / drop section difficulty]
-  └── 5. Temporal Attention Pooling          --> (B, 128)  [Learnable importance weighting]
-                                                  │
-                                                  ▼ Concatenation
-                                             (B, 640)
-```
-
-### Temporal Attention Formulation:
-For sequence feature $h_t \in \mathbb{R}^{128}$:
-$$\alpha_t = \frac{\exp(W_a h_t)}{\sum_{\tau=1}^T \exp(W_a h_\tau)}, \quad h_{\text{att}} = \sum_{t=1}^T \alpha_t h_t$$
+### Multi-Slice Sorted Exponential Decay Pooling:
+To capture both short burst spikes and long-term stamina without dilution:
+1. Slices of the top 0.5s, 1.5s, 5s, and 15s highest difficulty points are extracted from $s(t)$.
+2. Exponential decay weighting ($\gamma$) aggregates sorted feature vectors, ensuring peak spikes dominate the pooled representation:
+$$P(\gamma) = \sum_{k=1}^K \gamma^{k-1} \cdot h_{(k)}$$
+3. A global average pooling (GAP) slice provides overall stamina context.
 
 ---
 
-## 4. Sigmoid Bounded Head
+## 4. Uncapped Softplus Regression Head
 
-O2Jam difficulty levels cannot be negative, nor can they realistically exceed 185. Standard unconstrained linear heads risk predicting wild extrapolations ($< 0$ or $> 250$) on abnormal gimmick charts.
+Early architectures utilized a bounded Sigmoid head ($[15.0, 185.0]$) which suffered from gradient saturation above Lv. 130 and created an artificial prediction ceiling.
 
-The regression head uses a smooth, bounded Sigmoid mapping:
-$$\hat{y} = L_{\min} + (L_{\max} - L_{\min}) \cdot \sigma(W_2 \cdot \text{ReLU}(W_1 \cdot h_{\text{pooled}} + b_1) + b_2)$$
-where $L_{\min} = 15.0$ and $L_{\max} = 185.0$.
+The regression head utilizes an **Uncapped Softplus formulation**:
+$$\hat{y} = L_{\min} + \text{Softplus}(W_2 \cdot \text{GELU}(W_1 \cdot h_{\text{pooled}} + b_1) + b_2)$$
+where $L_{\min} = 15.0$.
+
+This guarantees non-negative, smooth gradient propagation while allowing natural extrapolation to ultra-high difficulty charts (Lv. 185 to Lv. 220+) without ceiling compression.
 
 ---
 
-## 5. Loss Function: Tier-Weighted Asymmetric Huber Loss
+## 5. Dual ONNX Model Outputs
 
-1. **Huber Loss ($\delta = 3.0$):** Linear penalties on large outliers prevent rare mislabeled community charts from pulling model gradients, while quadratic penalties near zero ensure precise sub-level convergence.
-2. **Tier Weighting ($w_{\text{tier}}$):** High-tier charts (Lv. 110–185) are naturally rarer than mid-tier charts (Lv. 50–80). High-tier samples receive up to $1.8\times$ weight to ensure the network does not underfit difficult charts.
-3. **Asymmetric Penalty ($1.15\times$ for under-predictions on Lv. 80+):** Players are significantly more sensitive to hard charts being under-rated (which makes a map feel unexpectedly crushing) than slight over-ratings.
+The exported ONNX model (`model.onnx`) provides two simultaneous outputs:
+1. `predicted_level` (`shape: [batch_size]`): Single scalar predicted O2Jam level.
+2. `strain_curve` (`shape: [batch_size, timeline_steps]`): Instantaneous difficulty strain curve across song duration (1 sample per second), consumed directly by the Tosu HUD overlay to render the in-game difficulty timeline sparkline.

@@ -2,14 +2,14 @@
 
 ## 1. Data Sources & Composition
 
-The training dataset integrates **4,055 unique 7-key charts** across three major O2Jam server rating systems:
+The training dataset integrates **4,044 unique 7-key charts** across three major O2Jam server rating systems:
 
 | Source | File Format | Role / Server Context | Unique Charts |
 | :--- | :--- | :--- | :--- |
 | **DMJAM** | `.osu` converts | Official / classic competitive server scales (`[E]`, `[N]`, `[H]`, `[D]`) | 1,861 |
-| **NSJAM** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,498 |
+| **NSJAM** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,487 |
 | **O2EZ** | `.osu` converts | O2EZ community modern re-ratings (`[O2EZ]`) | 696 |
-| **Total** | — | **Deduplicated Unified Dataset** | **4,055** |
+| **Total** | — | **Deduplicated Unified Dataset** | **4,044** |
 
 ### Credits
 - DMJAM & O2EZ charts provided by the [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975).
@@ -21,7 +21,7 @@ The training dataset integrates **4,055 unique 7-key charts** across three major
 
 Rather than converting `.ojn` to `.osu` text files (which introduces floating-point BPM rounding and timing drift), `scripts/step2_build_dataset.py` implements a zero-intermediate **pure Python binary reader**:
 
-### Binary Specification:
+### Binary Specification & Offset Isolation:
 - **Header (300 Bytes):**
   - Offset `0..3`: File signature / Song ID (`int32`)
   - Offset `4..7`: Signature string (`o2ma`)
@@ -31,6 +31,8 @@ Rather than converting `.ojn` to `.osu` text files (which introduces floating-po
   - Offset `112..123`: Note counts `[Easy, Normal, Hard]` (`int32`)
   - Offset `124..135`: Measure counts `[Easy, Normal, Hard]` (`int32`)
   - Offset `136..147`: Package offsets `[Easy, Normal, Hard]` (`int32`)
+  - Offset `292..295`: Package Hard difficulty seek pointer (`int32`)
+  - Offset `296..299`: Cover image offset / package boundary (`int32`)
 - **Block Header (8 Bytes):**
   - `measure` (`int32`), `channel` (`int16`), `event_count` (`int16`)
 - **Channels:**
@@ -40,6 +42,9 @@ Rather than converting `.ojn` to `.osu` text files (which introduces floating-po
   - `3..9`: 7-Key Note Lanes (1 to 7)
 - **Note Event (4 Bytes):**
   - Note value, volume, pan, and note-type flag (`0x00` = normal tap, `0x02` = LN hold head, `0x03` = LN hold tail).
+
+### Hard Difficulty Isolation:
+The `.ojn` container encapsulates Easy, Normal, and Hard charts sequentially in one binary file. The parser seeks strictly to `hard_offset = struct.unpack('<i', h[292:296])[0]` and reads up to `cover_off = struct.unpack('<i', h[296:300])[0]`. This ensures Hard charts are cleanly isolated without inadvertently merging preceding Easy/Normal notes into the event stream.
 
 Hold notes are paired by matching opening `0x02` events with their succeeding `0x03` event on the same lane, directly outputting start and release timestamps in milliseconds.
 

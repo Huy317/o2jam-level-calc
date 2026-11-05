@@ -107,9 +107,9 @@ class ResidualBlock1D(nn.Module):
 class O2JamLevelPredictor(nn.Module):
     def __init__(self, channels=128):
         super().__init__()
-        # Input representation: 35 one-hot states + 1 chord attack count + 1 hold count = 37 channels
+        # Total input channels = 35 (onehot) + 1 (taps) + 1 (holds) + 7 (tension) + 7 (jacks) + 7 (rel_gaps) + 2 (hand rolls) = 60
         self.stem = nn.Sequential(
-            nn.Conv1d(37, channels, kernel_size=1, bias=False),
+            nn.Conv1d(60, channels, kernel_size=1, bias=False),
             nn.BatchNorm1d(channels),
             nn.GELU(),
         )
@@ -125,9 +125,16 @@ class O2JamLevelPredictor(nn.Module):
         # Attention pooling scoring layer
         self.attn_conv = nn.Conv1d(channels, 1, kernel_size=1)
 
-        # Head: Multi-Scale Aggregation (p1 + p5 + p15 + gap + attn = 5 * channels = 640)
+        # Instantaneous 1D strain projection layer
+        self.strain_conv = nn.Sequential(
+            nn.Conv1d(channels, 32, kernel_size=1),
+            nn.GELU(),
+            nn.Conv1d(32, 1, kernel_size=1),
+        )
+
+        # Head: Multi-Scale Latent (640) + Sorted Decay Strain Features (5) = 645
         self.head = nn.Sequential(
-            nn.Linear(channels * 5, 256),
+            nn.Linear(channels * 5 + 5, 256),
             nn.GELU(),
             nn.Dropout(0.2),
             nn.Linear(256, 128),
@@ -136,18 +143,52 @@ class O2JamLevelPredictor(nn.Module):
             nn.Linear(128, 1),
         )
 
+        # Static kernels for depthwise kinematic convolutions
+        k_weights = torch.tensor([0.25, 0.5, 0.75, 1.0], dtype=torch.float32).view(1, 1, 4).repeat(7, 1, 1)
+        self.register_buffer('jack_kernel', k_weights)
+        k_hand = torch.tensor([0.5, 1.0], dtype=torch.float32).view(1, 1, 2)
+        self.register_buffer('hand_kernel', k_hand)
+
     def forward(self, x):
         # x: (Batch, T, 7) uint8 categorical integers [0..4]
-        b, t, c = x.shape
-        
-        # 1. One-hot representation: (B, 35, T)
+        b, t, _ = x.shape
+
+        # 1. Categorical one-hot: (B, 35, T)
         one_hot = F.one_hot(x.long(), num_classes=5).float().view(b, t, 35).permute(0, 2, 1)
-        
-        # 2. Explicit chord density & hold channels (B, 1, T)
-        taps = ((x == 1) | (x == 2)).float().sum(dim=-1, keepdim=True).permute(0, 2, 1)
-        holds = ((x == 3) | (x == 4)).float().sum(dim=-1, keepdim=True).permute(0, 2, 1)
-        
-        inp = torch.cat([one_hot, taps, holds], dim=1)  # (B, 37, T)
+
+        # 2. Base chord hits & holds
+        hits = ((x == 1) | (x == 2)).float().permute(0, 2, 1)   # (B, 7, T)
+        holds = ((x == 2) | (x == 3)).float().permute(0, 2, 1)  # (B, 7, T)
+        releases = (x == 4).float().permute(0, 2, 1)            # (B, 7, T)
+
+        taps_sum = hits.sum(dim=1, keepdim=True)   # (B, 1, T)
+        holds_sum = holds.sum(dim=1, keepdim=True) # (B, 1, T)
+
+        # 3. Kinematics: Pinned finger tension per lane (B, 7, T)
+        other_holds = holds_sum - holds
+        active_events = ((x == 1) | (x == 2) | (x == 4)).float().permute(0, 2, 1)
+        tension = (other_holds / 6.0) * active_events
+
+        # 4. Kinematics: Same-lane jack velocity per lane (B, 7, T)
+        padded_hits = F.pad(hits, (4, 0))
+        conv_j = F.conv1d(padded_hits, self.jack_kernel, groups=7)[:, :, :t]
+        jacks = hits * conv_j
+
+        # 5. Kinematics: LN release-to-press gaps per lane (B, 7, T)
+        padded_rel = F.pad(releases, (4, 0))
+        conv_rel = F.conv1d(padded_rel, self.jack_kernel, groups=7)[:, :, :t]
+        rel_gaps = hits * conv_rel
+
+        # 6. Kinematics: Same-hand roll velocity (Left: 0-2, Right: 4-6)
+        l_hits = hits[:, 0:3, :].sum(dim=1, keepdim=True)
+        r_hits = hits[:, 4:7, :].sum(dim=1, keepdim=True)
+        padded_l = F.pad(l_hits, (2, 0))
+        padded_r = F.pad(r_hits, (2, 0))
+        l_roll = l_hits * F.conv1d(padded_l, self.hand_kernel)[:, :, :t]
+        r_roll = r_hits * F.conv1d(padded_r, self.hand_kernel)[:, :, :t]
+
+        # Combine all 60 physical channels
+        inp = torch.cat([one_hot, taps_sum, holds_sum, tension, jacks, rel_gaps, l_roll, r_roll], dim=1) # (B, 60, T)
 
         feat = self.stem(inp)
         feat = self.block1(feat)
@@ -157,7 +198,7 @@ class O2JamLevelPredictor(nn.Module):
         feat = self.block5(feat)
         feat = self.block6(feat)
 
-        # Multi-scale temporal pooling:
+        # Multi-scale temporal pooling on latent features
         p1 = F.avg_pool1d(feat, kernel_size=50, stride=10, padding=25).amax(dim=-1)
         p5 = F.avg_pool1d(feat, kernel_size=250, stride=25, padding=125).amax(dim=-1)
         p15 = F.avg_pool1d(feat, kernel_size=750, stride=50, padding=375).amax(dim=-1)
@@ -165,11 +206,29 @@ class O2JamLevelPredictor(nn.Module):
         attn_w = torch.softmax(self.attn_conv(feat), dim=-1)
         attn_pool = (feat * attn_w).sum(dim=-1)
 
-        pooled = torch.cat([p1, p5, p15, gap, attn_pool], dim=-1)
+        # Instantaneous 1D strain curve (positive scalar strain)
+        s_raw = F.softplus(self.strain_conv(feat))  # (B, 1, T)
+        # 0.5s windows (25 frames, stride 12 frames)
+        s_win = F.avg_pool1d(s_raw, kernel_size=25, stride=12).squeeze(1)  # (B, K)
+        s_sorted, _ = torch.sort(s_win, dim=-1, descending=True)
+
+        top1 = s_sorted[:, 0:1]
+        top3 = s_sorted[:, :3].mean(dim=-1, keepdim=True)
+        top10 = s_sorted[:, :10].mean(dim=-1, keepdim=True)
+        top30 = s_sorted[:, :30].mean(dim=-1, keepdim=True)
+        s_mean = s_win.mean(dim=-1, keepdim=True)
+
+        strain_feats = torch.cat([top1, top3, top10, top30, s_mean], dim=-1)  # (B, 5)
+
+        pooled = torch.cat([p1, p5, p15, gap, attn_pool, strain_feats], dim=-1)
         raw = self.head(pooled).squeeze(-1)
-        
-        # Strictly bound output to valid O2Jam range [15.0, 185.0]
-        return 15.0 + 170.0 * torch.sigmoid(raw)
+
+        # Smooth Softplus lower-bounded at Lv. 15.0 (eliminates high-level saturation shelf)
+        level = 15.0 + F.softplus(raw)
+
+        # 1-second downsampled strain curve for HUD timeline visualization
+        strain_timeline = F.avg_pool1d(s_raw, kernel_size=50, stride=50).squeeze(1)
+        return level, strain_timeline
 
 
 def evaluate(model, loader, device):
@@ -181,7 +240,7 @@ def evaluate(model, loader, device):
         for x, y in loader:
             x, y = x.to(device), y.to(device)
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                pred = model(x)
+                pred, _ = model(x)
             all_preds.extend(pred.cpu().numpy().tolist())
             all_targets.extend(y.cpu().numpy().tolist())
 
@@ -241,12 +300,12 @@ def train():
             optimizer.zero_grad()
 
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                pred = model(x)
-                # Tier-weighted + Asymmetric Huber loss: prevents negative bias on elite stamina charts
+                pred, _ = model(x)
+                # Tier-weighted Huber loss with mild asymmetry on elite charts (Lv. 120+)
                 tier_weights = torch.ones_like(y)
-                tier_weights = torch.where(y > 110, 1.8, tier_weights)
-                tier_weights = torch.where(y > 140, 2.2, tier_weights)
-                asym_weights = torch.where((pred < y) & (y > 100), 1.5, 1.0)
+                tier_weights = torch.where(y > 110, 1.4, tier_weights)
+                tier_weights = torch.where(y > 140, 1.8, tier_weights)
+                asym_weights = torch.where((pred < y) & (y > 120), 1.15, 1.0)
                 loss_elements = F.smooth_l1_loss(pred, y, reduction="none", beta=1.0)
                 loss = (tier_weights * asym_weights * loss_elements).mean()
 
@@ -299,10 +358,11 @@ def train():
         opset_version=14,
         do_constant_folding=True,
         input_names=["note_grid"],
-        output_names=["predicted_level"],
+        output_names=["predicted_level", "strain_curve"],
         dynamic_axes={
             "note_grid": {0: "batch_size", 1: "time_steps"},
-            "predicted_level": {0: "batch_size"}
+            "predicted_level": {0: "batch_size"},
+            "strain_curve": {0: "batch_size", 1: "timeline_steps"}
         }
     )
     print(f"Saved {ONNX_PATH} ({os.path.getsize(ONNX_PATH) / 1048576:.2f} MB)")
