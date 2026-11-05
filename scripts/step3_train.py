@@ -1,11 +1,12 @@
 """
-Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,438 charts).
-Architecture:
+Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,423 charts).
+Model v5 Architecture:
   - 60 input channels (35 one-hot states + 2 counts + 23 kinematic channels)
   - 6 Residual Conv1D blocks (dilations 1, 2, 4, 8, 16, 32) -> ~5.06s receptive field
-  - Multi-scale temporal pooling (5s phrase, 15s climax, global average stamina, attention, strain stats)
-  - Smooth sigmoid bounded output [1.0, 185.0]
-  - Symmetric Huber loss
+  - Sustain-damped 2s burst pooling + 5s phrase + 15s climax
+  - Peak-relative active gating & stamina duration volume (eliminates marathon dilution)
+  - Linear-core Double-Softplus bounded output [1.0, 195.0] (eliminates sigmoid curvature sag)
+  - Pairwise slope preservation + mid-high/marathon targeted Huber loss + HUD strain calibration
 """
 
 import json
@@ -150,10 +151,11 @@ class O2JamLevelPredictor(nn.Module):
             nn.GELU(),
             nn.Conv1d(32, 1, kernel_size=1),
         )
+        nn.init.constant_(self.strain_conv[2].bias, -2.0)
 
-        # Head: Multi-Scale Latent (512) + Strain Features (2) = 514
+        # Head: 5 latent channel vectors (p2_damped, p5, p15, active_gap, attn_pool) + 3 summary scalars
         self.head = nn.Sequential(
-            nn.Linear(channels * 4 + 2, 256),
+            nn.Linear(channels * 5 + 3, 256),
             nn.GELU(),
             nn.Dropout(0.2),
             nn.Linear(256, 128),
@@ -171,6 +173,8 @@ class O2JamLevelPredictor(nn.Module):
     def forward(self, x, mask=None):
         # x: (Batch, T, 7) uint8 categorical integers [0..4]
         b, t, _ = x.shape
+        if mask is None:
+            mask = torch.ones((b, 1, t), device=x.device, dtype=torch.float32)
 
         # 1. Categorical one-hot: (B, 35, T)
         one_hot = F.one_hot(x.long(), num_classes=5).float().view(b, t, 35).permute(0, 2, 1)
@@ -217,37 +221,80 @@ class O2JamLevelPredictor(nn.Module):
         feat = self.block5(feat)
         feat = self.block6(feat)
 
-        # Multi-scale temporal pooling on latent features
-        p5 = F.avg_pool1d(feat, kernel_size=250, stride=25, padding=125).amax(dim=-1)
-        p15 = F.avg_pool1d(feat, kernel_size=750, stride=50, padding=375).amax(dim=-1)
+        # Masked multi-scale phrase pooling
+        feat_masked = feat * mask
+        p2 = F.avg_pool1d(feat_masked, kernel_size=100, stride=25, padding=50).amax(dim=-1)
+        p5 = F.avg_pool1d(feat_masked, kernel_size=250, stride=25, padding=125).amax(dim=-1)
+        p15 = F.avg_pool1d(feat_masked, kernel_size=750, stride=50, padding=375).amax(dim=-1)
 
-        # Instantaneous 1D strain curve (positive scalar strain)
-        s_raw = F.softplus(self.strain_conv(feat))  # (B, 1, T)
-        s_max = s_raw.amax(dim=-1)                  # (B, 1) peak strain
+        # Sustain-damped 2s burst: captures genuine bursts, suppresses isolated gimmick spikes
+        burst_excess = F.relu(p2 - p5)
+        sustain_ratio = p5.abs() / (burst_excess + 0.1)
+        p2_damped = p5 + burst_excess * torch.tanh(sustain_ratio)
 
-        if mask is None:
-            gap = feat.mean(dim=-1)
-            attn_w = torch.softmax(self.attn_conv(feat), dim=-1)
-            attn_pool = (feat * attn_w).sum(dim=-1)
-            s_mean = s_raw.mean(dim=-1)
-        else:
-            # Mask out padding to compute exact unpadded stamina and attention
-            mask_sum = mask.sum(dim=-1).clamp(min=1.0)
-            gap = (feat * mask).sum(dim=-1) / mask_sum
-            attn_logits = self.attn_conv(feat).masked_fill(mask == 0, -1e4)
-            attn_w = torch.softmax(attn_logits, dim=-1)
-            attn_pool = (feat * attn_w).sum(dim=-1)
-            s_mean = (s_raw * mask).sum(dim=-1) / mask_sum
+        # Instantaneous 1D strain curve (Level units)
+        s_raw = F.softplus(self.strain_conv(feat)) * mask
+        s_peak = s_raw.amax(dim=-1, keepdim=True).clamp(min=1e-5)
 
-        pooled = torch.cat([p5, p15, gap, attn_pool, s_max, s_mean], dim=-1)
+        # Peak-relative active gating: ignores quiet intros/outros (<65% peak) to avoid marathon dilution
+        active_gate = torch.sigmoid((s_raw - 0.65 * s_peak) / (0.10 * s_peak + 1e-5)) * mask
+        active_sum = active_gate.sum(dim=-1).clamp(min=1.0)
+        active_gap = (feat * active_gate).sum(dim=-1) / active_sum
+        s_active_mean = (s_raw * active_gate).sum(dim=-1) / active_sum
+        s_max = s_peak.squeeze(-1)
+
+        # Stamina duration volume: log of active seconds
+        stamina_vol = torch.log1p(active_sum * 0.02)
+
+        # Masked attention pool
+        attn_logits = self.attn_conv(feat).float() + (mask - 1.0) * 1e4
+        attn_weights = (F.softmax(attn_logits, dim=-1) * mask).to(feat.dtype)
+        attn_pool = (feat * attn_weights).sum(dim=-1)
+
+        # Scaled strain scalars for MLP input conditioning
+        s_max_norm = s_max * 0.01
+        s_active_norm = s_active_mean * 0.01
+
+        pooled = torch.cat([p2_damped, p5, p15, active_gap, attn_pool, s_max_norm, s_active_norm, stamina_vol], dim=-1)
         raw = self.head(pooled).squeeze(-1)
 
-        # Bounded sigmoid [1.0, 185.0] covering entire O2Jam human spectrum without runaway inflation
-        level = 1.0 + 184.0 * torch.sigmoid(raw)
+        # Centered Double-Softplus: strictly bounded in [1.0, 195.0], linear ~1.0 slope in [15.0, 140.0]
+        z = 75.0 + 30.0 * raw
+        level = 1.0 + 5.0 * F.softplus((z - 1.0) / 5.0) - 20.0 * F.softplus((z - 195.0) / 20.0)
 
         # 1-second downsampled strain curve for HUD timeline visualization
-        strain_timeline = F.avg_pool1d(s_raw, kernel_size=50, stride=50).squeeze(1)
+        strain_timeline = F.avg_pool1d(s_raw, kernel_size=50, stride=50, ceil_mode=True).squeeze(1)
         return level, strain_timeline
+
+
+def compute_loss(pred, y, mask, strain_curve):
+    pred_f = pred.float()
+    y_f = y.float()
+    diff = pred_f - y_f
+    base_loss = F.smooth_l1_loss(pred_f, y_f, reduction="none", beta=1.0)
+
+    # 1. Targeted under-prediction penalty focused on Lv. 70-92 & marathon charts (>150s)
+    dur_sec = mask.sum(dim=-1).squeeze(1) * 0.02
+    mid_high_focus = torch.exp(-0.5 * ((y_f - 82.0) / 9.0) ** 2)
+    marathon_factor = torch.sigmoid((dur_sec - 150.0) / 30.0) * torch.sigmoid((105.0 - y_f) / 5.0)
+    under_mask = (diff < 0).float()
+    asym_weight = 1.0 + under_mask * (0.40 * mid_high_focus + 0.35 * marathon_factor)
+    loss_point = (base_loss * asym_weight).mean()
+
+    # 2. Pairwise slope loss across mini-batch (enforces 1:1 difficulty slope across gaps)
+    pred_diff = pred_f.unsqueeze(1) - pred_f.unsqueeze(0)
+    y_diff = y_f.unsqueeze(1) - y_f.unsqueeze(0)
+    valid_pairs = ((y_diff.abs() >= 5.0) & (y_diff.abs() <= 45.0)).float()
+    pair_error = F.smooth_l1_loss(pred_diff, y_diff, beta=1.0, reduction="none")
+    loss_rank = (pair_error * valid_pairs).sum() / valid_pairs.sum().clamp(min=1.0)
+
+    # 3. Auxiliary strain calibration (anchors HUD strain curve in true level units)
+    s_peak = strain_curve.float().amax(dim=-1)
+    s_mean = strain_curve.float().mean(dim=-1)
+    effective_strain = 0.70 * s_peak + 0.30 * s_mean
+    loss_strain = F.smooth_l1_loss(effective_strain, y_f, beta=2.0)
+
+    return loss_point + 0.25 * loss_rank + 0.10 * loss_strain
 
 
 def evaluate(model, loader, device):
@@ -269,13 +316,15 @@ def evaluate(model, loader, device):
     mae = np.mean(np.abs(preds - targets))
     rmse = np.sqrt(np.mean((preds - targets) ** 2))
     corr = np.corrcoef(preds, targets)[0, 1] if len(preds) > 1 else 0.0
-    return mae, rmse, corr, preds, targets
+    mask_70_85 = (targets >= 70) & (targets < 85)
+    bias_70_85 = np.mean((preds - targets)[mask_70_85]) if np.any(mask_70_85) else 0.0
+    return mae, rmse, corr, bias_70_85, preds, targets
 
 
 def train():
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"=== Training Model v2 on {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}) ===")
+    print(f"=== Training Model v5 on {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}) ===")
 
     data = np.load(DATASET_PATH)
     flat_grids = data["flat_grids"]
@@ -324,8 +373,8 @@ def train():
             optimizer.zero_grad()
 
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                pred, _ = model(x, mask)
-                loss = F.smooth_l1_loss(pred, y, reduction="mean", beta=1.0)
+                pred, strain_curve = model(x, mask)
+                loss = compute_loss(pred, y, mask, strain_curve)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -338,7 +387,7 @@ def train():
         avg_train_loss = total_loss / max(1, n_batches)
 
         # Validation
-        val_mae, val_rmse, val_r, _, _ = evaluate(model, val_loader, device)
+        val_mae, val_rmse, val_r, val_bias_70_85, _, _ = evaluate(model, val_loader, device)
 
         is_best = val_mae < best_val_mae
         marker = " [BEST]" if is_best else ""
@@ -350,11 +399,12 @@ def train():
                 "val_mae": float(val_mae),
                 "val_rmse": float(val_rmse),
                 "val_r": float(val_r),
+                "val_bias_70_85": float(val_bias_70_85),
                 "val_indices": val_indices,
             }, CHECKPOINT_PATH)
 
         lr_cur = scheduler.get_last_lr()[0]
-        print(f"Epoch {epoch:2d}/{NUM_EPOCHS} | Train Loss: {avg_train_loss:.3f} | Val MAE: {val_mae:.2f} | Val RMSE: {val_rmse:.2f} | R: {val_r:.3f} | LR: {lr_cur:.1e}{marker}")
+        print(f"Epoch {epoch:2d}/{NUM_EPOCHS} | Train Loss: {avg_train_loss:.3f} | Val MAE: {val_mae:.2f} | Val RMSE: {val_rmse:.2f} | Bias 70-85: {val_bias_70_85:+5.2f} | R: {val_r:.3f} | LR: {lr_cur:.1e}{marker}")
 
     total_time = time.time() - start_time
     print(f"\nTraining completed in {total_time:.1f}s ({total_time / 60:.1f} min)")

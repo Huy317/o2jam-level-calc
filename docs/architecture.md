@@ -59,40 +59,48 @@ Total receptive field per frame is **253 frames $\approx 5.06$ seconds**, encomp
 
 ---
 
-## 3. Instantaneous Strain Curve Projection & Multi-Slice Decay Pooling
+## 3. Sustain-Damped Burst Pooling & Peak-Relative Active Gating
 
 Rhythm game charts cannot be judged purely by peak density or global averages:
-- A 3-minute chart with one 3-second Lv. 140 burst should not be diluted by calm intro/outro sections.
-- Human level ratings balance **sustained density** (stamina) with **peak bursts** (technical difficulty).
+- A 4-minute chart with intense Lv. 80 chordstreams should not have its rating watered down by 2 minutes of calm vocals or intros.
+- Conversely, an isolated 1-second mash gimmick should not trigger runaway difficulty inflation.
 
-### Instantaneous Strain Curve:
-Latent features are downsampled via 50-frame temporal max-pooling (1-second steps) and projected through a linear layer with ReLU activation:
-$$s(t) = \text{ReLU}(W_{\text{proj}} \cdot x_t + b_{\text{proj}}) \ge 0$$
-This generates the 1D difficulty timeline curve outputted directly by the ONNX model for real-time visualization.
+To solve both challenges simultaneously, the pooling stage combines three mechanisms:
 
-### Multi-Slice Sorted Exponential Decay Pooling:
-To capture both short burst spikes and long-term stamina without dilution:
-1. Slices of the top 0.5s, 1.5s, 5s, and 15s highest difficulty points are extracted from $s(t)$.
-2. Exponential decay weighting ($\gamma$) aggregates sorted feature vectors, ensuring peak spikes dominate the pooled representation:
-$$P(\gamma) = \sum_{k=1}^K \gamma^{k-1} \cdot h_{(k)}$$
-3. A global average pooling (GAP) slice provides overall stamina context.
+### 1. Sustain-Damped 2-Second Burst (`p2_damped`):
+Multi-scale temporal pooling extracts 2.0s (`p2`), 5.0s (`p5`), and 15.0s (`p15`) windowed peaks. The 2s burst excess is gated by its surrounding 5s phrase context:
+$$\text{excess} = \text{ReLU}(p_2 - p_5)$$
+$$p_{2\text{,damped}} = p_5 + \text{excess} \cdot \tanh\left(\frac{|p_5|}{\text{excess} + 0.1}\right)$$
+In legitimate high-difficulty charts, a 2s burst sits inside an active musical phrase, allowing the burst to pass through. In isolated gimmick mashes surrounded by silence, $p_5 \approx 0$ damps the spike completely.
+
+### 2. Peak-Relative Active Gating (`active_gap` & `stamina_vol`):
+Instead of whole-song global average pooling (which dilutes long marathon charts), frames are gated relative to the chart's own peak strain $s_{\text{peak}}$:
+$$g(t) = \sigma\left(\frac{s(t) - 0.65 \cdot s_{\text{peak}}}{0.10 \cdot s_{\text{peak}} + \epsilon}\right) \cdot \text{mask}(t)$$
+- **Active Feature Average (`active_gap`):** Averages features strictly across windows exceeding 65% of peak intensity, making technical difficulty immune to long quiet intros/outros.
+- **Stamina Duration Volume (`stamina_vol`):** Computes $\log(1 + T_{\text{active}})$, providing a monotonic measure of sustained climax duration in seconds.
+
+### 3. Masked Attention Pooling:
+Global attention pooling assigns learned softmax weights across all valid frames without padding leakage.
 
 ---
 
-## 4. Uncapped Softplus Regression Head
+## 4. Linear-Core Double-Softplus Regression Head
 
-Early architectures utilized a bounded Sigmoid head ($[15.0, 185.0]$) which suffered from gradient saturation above Lv. 130 and created an artificial prediction ceiling.
+Early architectures used either a Sigmoid head (which suffered from second-order curvature sagging in the dense Lv. 75–90 bracket) or an unbounded Softplus head (which caused runaway extrapolation above Lv. 180).
 
-The regression head utilizes an **Uncapped Softplus formulation**:
-$$\hat{y} = L_{\min} + \text{Softplus}(W_2 \cdot \text{GELU}(W_1 \cdot h_{\text{pooled}} + b_1) + b_2)$$
-where $L_{\min} = 15.0$.
+Model v5 utilizes a **Centered Double-Softplus formulation**:
+$$z = 76.5 + 30.0 \cdot \text{raw}$$
+$$\hat{y} = L_{\min} + \tau_{\text{low}} \cdot \text{Softplus}\left(\frac{z - L_{\min}}{\tau_{\text{low}}}\right) - \tau_{\text{high}} \cdot \text{Softplus}\left(\frac{z - L_{\max}}{\tau_{\text{high}}}\right)$$
+where $L_{\min} = 1.0, \tau_{\text{low}} = 5.0, L_{\max} = 195.0, \tau_{\text{high}} = 20.0$.
 
-This guarantees non-negative, smooth gradient propagation while allowing natural extrapolation to ultra-high difficulty charts (Lv. 185 to Lv. 220+) without ceiling compression.
+### Why This Works:
+1. **Zero S-Curve Sag:** The derivative $\frac{d\hat{y}}{dz} \approx 1.0$ across the entire human spectrum from **Lv. 15 to Lv. 140**, completely eliminating inflection-point distortion.
+2. **Smooth Asymptotic Ceiling:** Between Lv. 145 and Lv. 195, the upper softplus smoothly compresses predictions toward $L_{\max} = 195.0$, making runaway explosions mathematically impossible.
 
 ---
 
 ## 5. Dual ONNX Model Outputs
 
-The exported ONNX model (`model.onnx`) provides two simultaneous outputs:
+The exported ONNX model (`model.onnx`, 4.60 MB) provides two simultaneous outputs:
 1. `predicted_level` (`shape: [batch_size]`): Single scalar predicted O2Jam level.
-2. `strain_curve` (`shape: [batch_size, timeline_steps]`): Instantaneous difficulty strain curve across song duration (1 sample per second), consumed directly by the Tosu HUD overlay to render the in-game difficulty timeline sparkline.
+2. `strain_curve` (`shape: [batch_size, timeline_steps]`): Instantaneous difficulty strain curve across song duration (1 sample per second), calibrated to true level units and consumed directly by overlay clients.
