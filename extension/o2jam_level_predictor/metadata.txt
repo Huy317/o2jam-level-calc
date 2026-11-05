@@ -1,6 +1,6 @@
 Name: O2Jam 7K Level Predictor
 Author: O2Jam Predictor
-Version: 2.0.0
+Version: 2.1.0
 Usecase: Ingame Overlay, OBS Overlay
 CompatibleWith: Tosu
-Resolution: 320x190
+Resolution: 180x80

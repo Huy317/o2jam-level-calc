@@ -1,19 +1,11 @@
 [
   {
-    "uniqueID": "showGraph",
-    "type": "checkbox",
-    "title": "Show Difficulty Graph",
-    "description": "Display instantaneous difficulty strain timeline graph below the level badge",
-    "options": "",
-    "value": true
-  },
-  {
     "uniqueID": "showSongTitle",
     "type": "checkbox",
     "title": "Show Song Title",
     "description": "Display beatmap title and difficulty name",
     "options": "",
-    "value": true
+    "value": false
   },
   {
     "uniqueID": "showDecimal",
@@ -24,28 +16,12 @@
     "value": false
   },
   {
-    "uniqueID": "showTimeLabels",
-    "type": "checkbox",
-    "title": "Show Timeline & Peak Timestamps",
-    "description": "Display current playback time, peak spike timestamp, and total song duration",
-    "options": "",
-    "value": true
-  },
-  {
     "uniqueID": "hideNon7K",
     "type": "checkbox",
     "title": "Hide Overlay for Non-7K",
     "description": "Hide the entire overlay when playing non-7K maps",
     "options": "",
     "value": false
-  },
-  {
-    "uniqueID": "graphHeight",
-    "type": "number",
-    "title": "Graph Height (px)",
-    "description": "Height of the difficulty strain timeline graph in pixels (40 to 140)",
-    "options": "",
-    "value": 80
   },
   {
     "uniqueID": "overlayScale",
@@ -67,8 +43,8 @@
     "uniqueID": "accentColor",
     "type": "color",
     "title": "Accent Color",
-    "description": "Accent color for level number, rate badge, and strain curve",
+    "description": "Accent color for level number and rate badge",
     "options": "",
-    "value": "#ff5e7e"
+    "value": "#ffc800"
   }
 ]

@@ -1,19 +1,16 @@
 /**
  * O2Jam 7K Level Predictor - Tosu Static Extension
- * Modern HUD Overlay with fixed-width difficulty graph, editor/gameplay progress tracking & Tosu native settings.
+ * Minimalist HUD Overlay displaying ML-predicted O2Jam 7K difficulty rating.
  */
 
 // ── Default Settings ────────────────────────────────────────────────────────
 const settings = {
-  showGraph: true,
-  showSongTitle: true,
+  showSongTitle: false,
   showDecimal: false,
-  showTimeLabels: true,
   hideNon7K: false,
-  graphHeight: 80,
   overlayScale: 1.0,
   overlayOpacity: 0.85,
-  accentColor: "#ff5e7e",
+  accentColor: "#ffc800",
 };
 
 // ── Runtime State ───────────────────────────────────────────────────────────
@@ -22,13 +19,9 @@ let lastProcessedKey = null;
 let isPredicting = false;
 let currentRateInfo = { rate: 1.0, label: "", type: "" };
 let currentRawLevel = null;
-let currentStrainCurve = null;
-let currentMapTiming = { firstSec: 0, durationSec: 0 };
 let currentSongTitle = "";
 let isCurrentMap7K = true;
 let commandsSocket = null;
-let currentProgressRatio = null;
-let currentLiveSec = null;
 
 // ── DOM Elements ────────────────────────────────────────────────────────────
 const overlayContainer = document.getElementById("overlay-container");
@@ -38,12 +31,6 @@ const levelDisplay = document.getElementById("level-display");
 const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
 const rateBadge = document.getElementById("rate-badge");
-const graphBoxEl = document.getElementById("graph-box");
-const strainCanvas = document.getElementById("strain-canvas");
-const timeRowEl = document.getElementById("time-row");
-const timeCurrEl = document.getElementById("time-curr");
-const timePeakEl = document.getElementById("time-peak");
-const timeTotalEl = document.getElementById("time-total");
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function getHost() {
@@ -66,7 +53,7 @@ function hexToRgba(hex, alpha) {
   let c = String(hex || "").replace("#", "");
   if (c.length === 3) c = c.split("").map((x) => x + x).join("");
   const num = parseInt(c, 16);
-  if (isNaN(num)) return `rgba(255, 94, 126, ${alpha})`;
+  if (isNaN(num)) return `rgba(255, 200, 0, ${alpha})`;
   return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
 }
 
@@ -79,13 +66,6 @@ function parseBoolean(val, fallback) {
     if (s === "false" || s === "0") return false;
   }
   return fallback;
-}
-
-function formatTime(sec) {
-  if (!Number.isFinite(sec) || sec < 0) sec = 0;
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
 }
 
 function updateStatus(text, dotClass = "idle") {
@@ -126,16 +106,9 @@ function applySettings(newSettings) {
     }
   }
 
-  // Parse each known setting with type safety
-  if ("showGraph" in raw) settings.showGraph = parseBoolean(raw.showGraph, settings.showGraph);
   if ("showSongTitle" in raw) settings.showSongTitle = parseBoolean(raw.showSongTitle, settings.showSongTitle);
   if ("showDecimal" in raw) settings.showDecimal = parseBoolean(raw.showDecimal, settings.showDecimal);
-  if ("showTimeLabels" in raw) settings.showTimeLabels = parseBoolean(raw.showTimeLabels, settings.showTimeLabels);
   if ("hideNon7K" in raw) settings.hideNon7K = parseBoolean(raw.hideNon7K, settings.hideNon7K);
-  if ("graphHeight" in raw) {
-    const num = Number(raw.graphHeight);
-    if (Number.isFinite(num) && num >= 30) settings.graphHeight = num;
-  }
   if ("overlayScale" in raw) {
     const num = Number(raw.overlayScale);
     if (Number.isFinite(num) && num > 0) settings.overlayScale = num;
@@ -154,15 +127,6 @@ function applySettings(newSettings) {
   root.setProperty("--accent-color-glow", hexToRgba(settings.accentColor, 0.45));
   root.setProperty("--bg-opacity", settings.overlayOpacity);
   root.setProperty("--overlay-scale", settings.overlayScale);
-  root.setProperty("--graph-height", `${Math.max(40, settings.graphHeight)}px`);
-
-  // Graph Box & Time Row Visibility
-  if (graphBoxEl) {
-    graphBoxEl.style.display = settings.showGraph ? "flex" : "none";
-  }
-  if (timeRowEl) {
-    timeRowEl.style.display = settings.showTimeLabels ? "flex" : "none";
-  }
 
   // Song Title Visibility
   if (songInfoEl) {
@@ -178,16 +142,7 @@ function applySettings(newSettings) {
 
   // Non-7K Overlay Visibility
   if (overlayContainer) {
-    if (settings.hideNon7K && !isCurrentMap7K) {
-      overlayContainer.style.display = "none";
-    } else {
-      overlayContainer.style.display = "flex";
-    }
-  }
-
-  // Redraw graph with new dimensions and colors
-  if (currentStrainCurve && settings.showGraph) {
-    renderDifficultyGraph(currentStrainCurve, currentProgressRatio, currentLiveSec);
+    overlayContainer.style.display = (settings.hideNon7K && !isCurrentMap7K) ? "none" : "flex";
   }
 }
 
@@ -219,7 +174,6 @@ function connectCommandsSocket() {
     commandsSocket = new WebSocket(url);
 
     commandsSocket.onopen = () => {
-      console.log(`[O2Jam Predictor] Connected to Tosu Commands WS: ${url}`);
       requestSettings();
     };
 
@@ -235,8 +189,6 @@ function connectCommandsSocket() {
         } else {
           packet = JSON.parse(raw);
         }
-
-        console.log("[O2Jam Predictor] Received settings update from Tosu:", packet);
 
         if (Array.isArray(packet)) {
           applySettings(packet);
@@ -264,204 +216,7 @@ function connectCommandsSocket() {
   }
 }
 
-// ── 2. Difficulty Graph Canvas Renderer ─────────────────────────────────────
-function traceSmoothCurve(ctx, points) {
-  if (points.length < 2) return;
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i === 0 ? 0 : i - 1];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[i + 2 < points.length ? i + 2 : i + 1];
-
-    const cp1x = p1.x + (p2.x - p0.x) / 6;
-    const cp1y = p1.y + (p2.y - p0.y) / 6;
-    const cp2x = p2.x - (p3.x - p1.x) / 6;
-    const cp2y = p2.y - (p3.y - p1.y) / 6;
-
-    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
-  }
-}
-
-function getInterpolatedCurveY(points, curX) {
-  if (points.length === 0) return 0;
-  if (curX <= points[0].x) return points[0].y;
-  if (curX >= points[points.length - 1].x) return points[points.length - 1].y;
-
-  for (let i = 0; i < points.length - 1; i++) {
-    if (curX >= points[i].x && curX <= points[i + 1].x) {
-      const span = points[i + 1].x - points[i].x;
-      const t = span > 0 ? (curX - points[i].x) / span : 0;
-      return points[i].y + t * (points[i + 1].y - points[i].y);
-    }
-  }
-  return points[points.length - 1].y;
-}
-
-function renderDifficultyGraph(strainCurve, progressRatio = null, liveSec = null) {
-  if (!strainCanvas || !settings.showGraph || !strainCurve || strainCurve.length === 0) {
-    return;
-  }
-
-  // Crisp 2x internal rendering for retina / 1440p displays
-  const targetW = 584;
-  const targetH = Math.round(settings.graphHeight * 2);
-  if (strainCanvas.width !== targetW || strainCanvas.height !== targetH) {
-    strainCanvas.width = targetW;
-    strainCanvas.height = targetH;
-  }
-
-  const ctx = strainCanvas.getContext("2d");
-  const w = strainCanvas.width;
-  const h = strainCanvas.height;
-
-  ctx.clearRect(0, 0, w, h);
-
-  // Layout bounds & padding
-  const padX = 10;
-  const padTop = 14;
-  const padBottom = 10;
-  const drawW = w - 2 * padX;
-  const drawH = h - padTop - padBottom;
-
-  // Find peak strain
-  let maxStrain = 0;
-  let peakIdx = 0;
-  for (let i = 0; i < strainCurve.length; i++) {
-    if (strainCurve[i] > maxStrain) {
-      maxStrain = strainCurve[i];
-      peakIdx = i;
-    }
-  }
-  if (maxStrain <= 0.001) maxStrain = 1.0;
-
-  const len = strainCurve.length;
-  const points = [];
-  for (let i = 0; i < len; i++) {
-    const normX = len > 1 ? i / (len - 1) : 0;
-    const x = padX + normX * drawW;
-    const normY = Math.min(1.0, Math.max(0.0, strainCurve[i] / maxStrain));
-    const y = (h - padBottom) - normY * drawH;
-    points.push({ x, y });
-  }
-
-  // 1. Soft Background Area Gradient (Full Chart)
-  const baseGrad = ctx.createLinearGradient(0, padTop, 0, h - padBottom);
-  baseGrad.addColorStop(0, hexToRgba(settings.accentColor, 0.22));
-  baseGrad.addColorStop(1, hexToRgba(settings.accentColor, 0.01));
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, h - padBottom + 2);
-  ctx.lineTo(points[0].x, points[0].y);
-  traceSmoothCurve(ctx, points);
-  ctx.lineTo(points[len - 1].x, h - padBottom + 2);
-  ctx.closePath();
-  ctx.fillStyle = baseGrad;
-  ctx.fill();
-  ctx.restore();
-
-  // 2. Played Progress Area Fill (Clipped to Current Playhead)
-  const hasProgress = progressRatio !== null && progressRatio >= 0 && progressRatio <= 1;
-  const progressX = hasProgress ? padX + progressRatio * drawW : null;
-
-  if (hasProgress && progressX > padX) {
-    const playedGrad = ctx.createLinearGradient(0, padTop, 0, h - padBottom);
-    playedGrad.addColorStop(0, hexToRgba(settings.accentColor, 0.48));
-    playedGrad.addColorStop(1, hexToRgba(settings.accentColor, 0.06));
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, progressX, h);
-    ctx.clip();
-
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, h - padBottom + 2);
-    ctx.lineTo(points[0].x, points[0].y);
-    traceSmoothCurve(ctx, points);
-    ctx.lineTo(points[len - 1].x, h - padBottom + 2);
-    ctx.closePath();
-    ctx.fillStyle = playedGrad;
-    ctx.fill();
-    ctx.restore();
-  }
-
-  // 3. Smooth Curve Stroke
-  ctx.save();
-  ctx.beginPath();
-  traceSmoothCurve(ctx, points);
-  ctx.strokeStyle = settings.accentColor;
-  ctx.lineWidth = 4.5;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.stroke();
-  ctx.restore();
-
-  // 4. Peak Difficulty Spike Beacon
-  const peakPt = points[peakIdx];
-  if (peakPt) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(peakPt.x, peakPt.y, 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffffff";
-    ctx.shadowColor = "#ffffff";
-    ctx.shadowBlur = 8;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = settings.accentColor;
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // 5. Active Playhead Cursor (Editor & In-game)
-  if (hasProgress && progressX !== null) {
-    const progressY = getInterpolatedCurveY(points, progressX);
-
-    // Dashed Vertical Guide Line
-    ctx.save();
-    ctx.setLineDash([6, 6]);
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.moveTo(progressX, padTop - 4);
-    ctx.lineTo(progressX, h - padBottom + 4);
-    ctx.stroke();
-    ctx.restore();
-
-    // White Cursor Dot on Top of Curve
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(progressX, progressY, 6.5, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffffff";
-    ctx.shadowColor = settings.accentColor;
-    ctx.shadowBlur = 10;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = settings.accentColor;
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // 6. Update Time Labels
-  if (timeRowEl && settings.showTimeLabels) {
-    const displayLiveSec = liveSec !== null ? liveSec : 0;
-    if (timeCurrEl) timeCurrEl.textContent = formatTime(displayLiveSec);
-
-    // Calculate exact osu! editor timestamp for the peak spike
-    const peakEditorSec = currentMapTiming.firstSec + peakIdx * currentRateInfo.rate;
-    if (timePeakEl) {
-      const peakLevelStr = currentRawLevel ? ` · Lv.${Math.round(currentRawLevel)}` : "";
-      timePeakEl.textContent = `★ Peak ${formatTime(peakEditorSec)}${peakLevelStr}`;
-    }
-
-    const totalSec = currentMapTiming.firstSec + currentMapTiming.durationSec * currentRateInfo.rate;
-    if (timeTotalEl) timeTotalEl.textContent = formatTime(totalSec);
-  }
-}
-
-// ── 3. ONNX Runtime Initialization ──────────────────────────────────────────
+// ── 2. ONNX Runtime Initialization ──────────────────────────────────────────
 async function initONNX() {
   updateStatus("Loading model...", "loading");
   try {
@@ -482,7 +237,7 @@ async function initONNX() {
   }
 }
 
-// ── 4. Parse .osu Text & Build Discrete (T, 7) Grid ──────────────────────────
+// ── 3. Parse .osu Text & Build Discrete (T, 7) Grid ──────────────────────────
 function parseOsuBeatmap(osuText, rate = 1.0) {
   const lines = osuText.split(/\r?\n/);
   let mode = null;
@@ -495,18 +250,18 @@ function parseOsuBeatmap(osuText, rate = 1.0) {
     if (!line) continue;
 
     if (line === "[HitObjects]") {
+      const csNum = parseInt(circleSize, 10);
+      const is7K = (mode === "3" || mode === 3) && csNum === 7;
+      if (!is7K) {
+        return { is7KMania: false, circleSize: csNum || circleSize || "?" };
+      }
       isHitObjects = true;
       continue;
     }
 
     if (!isHitObjects) {
-      const colonIdx = line.indexOf(":");
-      if (colonIdx !== -1) {
-        const key = line.slice(0, colonIdx).trim();
-        const val = line.slice(colonIdx + 1).trim();
-        if (key === "Mode") mode = val;
-        else if (key === "CircleSize") circleSize = val;
-      }
+      if (line.startsWith("Mode:")) mode = line.slice(5).trim();
+      else if (line.startsWith("CircleSize:")) circleSize = line.slice(11).trim();
     } else {
       if (line.startsWith("[")) break;
       const parts = line.split(",");
@@ -516,7 +271,7 @@ function parseOsuBeatmap(osuText, rate = 1.0) {
         const nType = parseInt(parts[3], 10);
         const col = Math.min(Math.max(Math.floor((x * 7) / 512), 0), 6);
         let endT = t;
-        if (nType & 128 && parts.length > 5) {
+        if ((nType & 128) && parts.length > 5) {
           const lnEnd = parseInt(parts[5].split(":")[0], 10);
           if (!isNaN(lnEnd)) endT = lnEnd;
         }
@@ -527,12 +282,8 @@ function parseOsuBeatmap(osuText, rate = 1.0) {
 
   const csNum = parseInt(circleSize, 10);
   const is7KMania = (mode === "3" || mode === 3) && csNum === 7;
-
   if (!is7KMania) {
-    return {
-      is7KMania: false,
-      circleSize: csNum || circleSize || "?",
-    };
+    return { is7KMania: false, circleSize: csNum || circleSize || "?" };
   }
 
   if (notes.length < 5) {
@@ -550,7 +301,6 @@ function parseOsuBeatmap(osuText, rate = 1.0) {
   const durationMs = Math.max(0, maxEndT - firstT);
   const effectiveDurationMs = durationMs / r;
 
-  // 20ms time bins in effective playback time
   let tFrames = Math.floor(effectiveDurationMs / 20) + 1;
   tFrames = Math.min(Math.max(tFrames, 1), 25000);
 
@@ -575,17 +325,10 @@ function parseOsuBeatmap(osuText, rate = 1.0) {
     }
   }
 
-  return {
-    is7KMania: true,
-    grid,
-    tFrames,
-    noteCount: notes.length,
-    firstT,
-    durationMs,
-  };
+  return { is7KMania: true, grid, tFrames };
 }
 
-// ── 5. ONNX Model Inference (Level & Strain Curve) ──────────────────────────
+// ── 4. ONNX Model Inference ─────────────────────────────────────────────────
 async function runPrediction(parsed) {
   if (!ortSession || !parsed.grid) return null;
 
@@ -595,12 +338,10 @@ async function runPrediction(parsed) {
   const latencyMs = (performance.now() - t0).toFixed(1);
 
   const level = results.predicted_level.data[0];
-  const strainCurve = results.strain_curve ? results.strain_curve.data : null;
-
-  return { level, strainCurve, latencyMs };
+  return { level, latencyMs };
 }
 
-// ── 6. Fetch Active Beatmap from Tosu ────────────────────────────────────────
+// ── 5. Fetch Active Beatmap from Tosu ────────────────────────────────────────
 async function fetchActiveBeatmap() {
   const host = getHost();
   const endpoint = `http://${host}/files/beatmap/file?_=${Date.now()}`;
@@ -611,18 +352,16 @@ async function fetchActiveBeatmap() {
   return await resp.text();
 }
 
-// ── 7. Rate & Mod Extraction ────────────────────────────────────────────────
+// ── 6. Rate & Mod Extraction ────────────────────────────────────────────────
 function extractRateAndMods(data) {
   const isPlaying = Number(data?.state?.number ?? data?.status?.number ?? 0) === 2;
 
-  // Direct playbackRate if given by tosu during active play
   const rateCandidate = Number(data?.gameplay?.playbackRate);
   if (isPlaying && Number.isFinite(rateCandidate) && rateCandidate > 0 && Math.abs(rateCandidate - 1.0) > 0.01) {
     const formatted = rateCandidate.toFixed(2).replace(/\.?0+$/, "");
     return { rate: rateCandidate, label: `${formatted}x`, type: "rate" };
   }
 
-  // Mod candidates: prioritize menu.mods in song select / menus
   const mods = isPlaying
     ? (data?.play?.mods || data?.gameplay?.mods || data?.menu?.mods)
     : (data?.menu?.mods || data?.play?.mods || data?.gameplay?.mods);
@@ -659,27 +398,7 @@ function extractRateAndMods(data) {
   return { rate: 1.0, label: "", type: "" };
 }
 
-// ── 8. Robust Current Song Time Extraction (Editor, Play & Menu) ─────────────
-function extractCurrentSongTimeMs(data) {
-  const candidates = [
-    data?.beatmap?.time?.live,
-    data?.beatmap?.time?.current,
-    data?.menu?.bm?.time?.current,
-    data?.play?.time?.current,
-    data?.play?.time,
-  ];
-
-  for (const value of candidates) {
-    const num = Number(value);
-    if (Number.isFinite(num)) {
-      return num;
-    }
-  }
-
-  return null;
-}
-
-// ── 9. Recompute Beatmap Difficulty ─────────────────────────────────────────
+// ── 7. Recompute Beatmap Difficulty ─────────────────────────────────────────
 async function processCurrentBeatmap() {
   if (isPredicting) return;
   isPredicting = true;
@@ -692,7 +411,6 @@ async function processCurrentBeatmap() {
     if (!parsed.is7KMania) {
       isCurrentMap7K = false;
       currentRawLevel = null;
-      currentStrainCurve = null;
       levelDisplay.textContent = "--";
       updateRateBadge({ rate: 1.0, label: "", type: "" });
       updateStatus(`Non-7K (${parsed.circleSize}K)`, "idle");
@@ -710,7 +428,6 @@ async function processCurrentBeatmap() {
 
     if (parsed.error) {
       currentRawLevel = null;
-      currentStrainCurve = null;
       levelDisplay.textContent = "--";
       updateRateBadge({ rate: 1.0, label: "", type: "" });
       updateStatus(parsed.error, "warning");
@@ -724,11 +441,6 @@ async function processCurrentBeatmap() {
 
     if (predResult) {
       currentRawLevel = predResult.level;
-      currentStrainCurve = predResult.strainCurve;
-      currentMapTiming = {
-        firstSec: parsed.firstT / 1000,
-        durationSec: (parsed.durationMs / 1000) / currentRateInfo.rate,
-      };
 
       levelDisplay.textContent = settings.showDecimal
         ? currentRawLevel.toFixed(1)
@@ -738,13 +450,8 @@ async function processCurrentBeatmap() {
       void levelDisplay.offsetWidth;
       levelDisplay.classList.add("pulse");
 
-      if (settings.showGraph) {
-        renderDifficultyGraph(currentStrainCurve, currentProgressRatio, currentLiveSec);
-      }
-
       const rateInfoText = currentRateInfo.label ? ` [${currentRateInfo.label}]` : "";
       updateStatus(`7K${rateInfoText} (${predResult.latencyMs}ms)`, "");
-      console.log(`[O2Jam Predictor] Level: ${predResult.level.toFixed(2)} @ rate ${currentRateInfo.rate}`);
     }
   } catch (err) {
     console.error("[O2Jam Predictor] Error processing beatmap:", err);
@@ -754,13 +461,12 @@ async function processCurrentBeatmap() {
   }
 }
 
-// ── 10. Tosu WebSocket Stream (V2) ──────────────────────────────────────────
+// ── 8. Tosu WebSocket Stream (V2) ──────────────────────────────────────────
 function connectToTosu() {
   const host = getHost();
   const counterPath = getCounterFolderName();
   const v2Url = `ws://${host}/websocket/v2?l=${encodeURI(counterPath)}`;
 
-  console.log(`[O2Jam Predictor] Connecting to Tosu WebSocket: ${v2Url}`);
   const ws = new WebSocket(v2Url);
 
   ws.onopen = () => {
@@ -775,7 +481,7 @@ function connectToTosu() {
       const bm = data?.beatmap;
       if (!bm) return;
 
-      // Extract Song Title
+      // Update Song Title if present
       const title = bm?.title || "";
       const version = bm?.version || "";
       if (title || version) {
@@ -797,21 +503,6 @@ function connectToTosu() {
         currentRateInfo = rateInfo;
         processCurrentBeatmap();
       }
-
-      // Live Scrubber / Playhead Tracking in Editor, Gameplay, or Menus
-      const liveTimeMs = extractCurrentSongTimeMs(data);
-      if (typeof liveTimeMs === "number" && currentStrainCurve && currentMapTiming.durationSec > 0) {
-        const liveSec = liveTimeMs / 1000;
-        const elapsedSec = (liveTimeMs - (currentMapTiming.firstSec * 1000)) / (1000 * currentRateInfo.rate);
-        const progressRatio = Math.max(0, Math.min(1, elapsedSec / currentMapTiming.durationSec));
-
-        currentProgressRatio = progressRatio;
-        currentLiveSec = liveSec;
-
-        if (settings.showGraph) {
-          renderDifficultyGraph(currentStrainCurve, progressRatio, liveSec);
-        }
-      }
     } catch (err) {
       console.error("[O2Jam Predictor] Error handling WS message:", err);
     }
@@ -827,14 +518,13 @@ function connectToTosu() {
   };
 }
 
-// ── 11. Bootstrap ───────────────────────────────────────────────────────────
+// ── 9. Bootstrap ───────────────────────────────────────────────────────────
 async function main() {
   await loadInitialDefaults();
   connectCommandsSocket();
   await initONNX();
   connectToTosu();
 
-  // On window focus, ask Tosu for latest settings from values.json
   window.addEventListener("focus", () => {
     requestSettings();
   });
