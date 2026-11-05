@@ -1,22 +1,74 @@
-{
-  "general": {
-    "showTitle": {
-      "type": "boolean",
-      "label": "Show Song Title",
-      "value": true
-    },
-    "showDecimal": {
-      "type": "boolean",
-      "label": "Show Decimal Precision (e.g. Lv. 94.2)",
-      "value": false
-    },
-    "badgeScale": {
-      "type": "number",
-      "label": "Overlay Scale",
-      "value": 1.0,
-      "min": 0.5,
-      "max": 2.0,
-      "step": 0.1
-    }
+[
+  {
+    "uniqueID": "showGraph",
+    "type": "checkbox",
+    "title": "Show Difficulty Graph",
+    "description": "Display instantaneous difficulty strain timeline graph below the level badge",
+    "options": "",
+    "value": true
+  },
+  {
+    "uniqueID": "showSongTitle",
+    "type": "checkbox",
+    "title": "Show Song Title",
+    "description": "Display beatmap title and difficulty name",
+    "options": "",
+    "value": true
+  },
+  {
+    "uniqueID": "showDecimal",
+    "type": "checkbox",
+    "title": "Show Decimal Precision",
+    "description": "Show decimal level precision (e.g. Lv. 94.2 instead of Lv. 94)",
+    "options": "",
+    "value": false
+  },
+  {
+    "uniqueID": "showTimeLabels",
+    "type": "checkbox",
+    "title": "Show Timeline & Peak Timestamps",
+    "description": "Display current playback time, peak spike timestamp, and total song duration",
+    "options": "",
+    "value": true
+  },
+  {
+    "uniqueID": "hideNon7K",
+    "type": "checkbox",
+    "title": "Hide Overlay for Non-7K",
+    "description": "Hide the entire overlay when playing non-7K maps",
+    "options": "",
+    "value": false
+  },
+  {
+    "uniqueID": "graphHeight",
+    "type": "number",
+    "title": "Graph Height (px)",
+    "description": "Height of the difficulty strain timeline graph in pixels (40 to 140)",
+    "options": "",
+    "value": 80
+  },
+  {
+    "uniqueID": "overlayScale",
+    "type": "number",
+    "title": "Overlay Scale",
+    "description": "Scale factor for the overlay widget (0.5 to 2.0)",
+    "options": "",
+    "value": 1.0
+  },
+  {
+    "uniqueID": "overlayOpacity",
+    "type": "number",
+    "title": "Card Background Opacity",
+    "description": "Opacity factor for the background card (0.1 to 1.0)",
+    "options": "",
+    "value": 0.85
+  },
+  {
+    "uniqueID": "accentColor",
+    "type": "color",
+    "title": "Accent Color",
+    "description": "Accent color for level number, rate badge, and strain curve",
+    "options": "",
+    "value": "#ff5e7e"
   }
-}
+]

@@ -10,10 +10,21 @@
 </head>
 <body>
   <div id="overlay-container">
+    <div class="song-info" id="song-info" style="display: none;">
+      <span class="song-title" id="song-title"></span>
+    </div>
     <div class="level-row">
       <span class="level-label">Level.</span>
       <span class="level-num" id="level-display">--</span>
       <span class="rate-badge" id="rate-badge"></span>
+    </div>
+    <div class="graph-box" id="graph-box">
+      <canvas id="strain-canvas" width="584" height="160"></canvas>
+      <div class="time-row" id="time-row">
+        <span class="time-curr" id="time-curr">00:00</span>
+        <span class="time-peak" id="time-peak">Peak: --:--</span>
+        <span class="time-total" id="time-total">00:00</span>
+      </div>
     </div>
     <div class="status-row">
       <span class="status-dot idle" id="status-dot"></span>
