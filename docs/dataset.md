@@ -2,15 +2,16 @@
 
 ## 1. Data Sources & Composition
 
-The training dataset integrates **4,438 unique 7-key charts** across four major O2Jam server rating systems, with uncompressed native `.ojn` files taking highest priority:
+The training dataset integrates **4,423 unique 7-key charts** across four major O2Jam server rating systems, with uncompressed native `.ojn` files taking highest priority:
 
 | Source | File Format | Role / Server Context | Unique Charts |
 | :--- | :--- | :--- | :---: |
-| **Private Server Native** | `.ojn` native binary | Uncorrupted master charts from community channels (`DSong`, `ESong`, `HSong`, `NSong`) | 2,381 |
-| **NSJAM Native** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,227 |
-| **osu! O2EZ** | `.osu` converts | O2EZ community modern re-ratings (`[O2EZ]`) | 425 |
-| **osu! DMJAM** | `.osu` converts | Legacy converts of DMJAM charts (`[E]`, `[N]`, `[H]`, `[D]`) | 405 |
-| **Total** | — | **Deduplicated Unified Dataset** | **4,438** |
+| **Private Server Native** | `.ojn` native binary | Uncorrupted master charts from community channels (`DSong`, `ESong`, `HSong`, `NSong`) | 2,367 |
+| **NSJAM Native** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,225 |
+| **osu! Converts** | `.osu` converts | osu!mania 7K conversions (405 DMJAM `[E],[N],[H],[D]`, 426 O2EZ `[O2EZ]`) | 831 |
+| **Total** | — | **Deduplicated Unified Dataset** | **4,423** |
+
+Charts with level $\le 3$ or fewer than 20 notes are filtered out during parsing. The osu! converts tag split (405 DMJAM, 426 O2EZ) is tracked via the dataset priority metadata.
 
 ### Credits
 - DMJAM & O2EZ charts provided by the [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975).
@@ -24,28 +25,35 @@ Rather than converting `.ojn` to `.osu` text files (which introduces floating-po
 
 ### Binary Specification & Offset Isolation:
 - **Header (300 Bytes):**
-  - Offset `0..3`: File signature / Song ID (`int32`)
-  - Offset `4..7`: Signature string (`o2ma`)
-  - Offset `8..27`: Song title string
-  - Offset `28..47`: Artist string
-  - Offset `88..107`: Level ratings for `[Easy, Normal, Hard]` (`int16` array). We target the competitive `Hard (HX)` difficulty.
-  - Offset `112..123`: Note counts `[Easy, Normal, Hard]` (`int32`)
-  - Offset `124..135`: Measure counts `[Easy, Normal, Hard]` (`int32`)
-  - Offset `136..147`: Package offsets `[Easy, Normal, Hard]` (`int32`)
-  - Offset `292..295`: Package Hard difficulty seek pointer (`int32`)
-  - Offset `296..299`: Cover image offset / package boundary (`int32`)
+  - Offset `0..3`: Song ID (`int32`)
+  - Offset `4..7`: Signature string `"ojn\0"` (`0x006E6A6F`, `uint32`)
+  - Offset `16..19`: Initial BPM (`float32`)
+  - Offset `20..27`: Level ratings for `[Easy, Normal, Hard, pad]` (`int16[4]`). Code reads the Hard difficulty level at offset `24..25` (`int16`).
+  - Offset `108..171`: Song title (64 bytes, CP949 null-terminated string)
+  - Offset `172..203`: Artist name (32 bytes, CP949 null-terminated string)
+  - Offset `284..287`: Easy note data offset (`int32`)
+  - Offset `288..291`: Normal note data offset (`int32`)
+  - Offset `292..295`: Hard note data offset (`int32`, code reads here)
+  - Offset `296..299`: Cover image offset / package boundary (`int32`, code reads here)
 - **Block Header (8 Bytes):**
   - `measure` (`int32`), `channel` (`int16`), `event_count` (`int16`)
 - **Channels:**
-  - `0`: Fractional measure length
-  - `1`: Fixed BPM change
-  - `2`: Extended fractional BPM change
-  - `3..9`: 7-Key Note Lanes (1 to 7)
-- **Note Event (4 Bytes):**
-  - Note value, volume, pan, and note-type flag (`0x00` = normal tap, `0x02` = LN hold head, `0x03` = LN hold tail).
+  - `0`: Fractional measure length multiplier (`float32`)
+  - `1`: BPM change event (`float32`)
+  - `2..8`: 7-Key note lanes 1 to 7 (`col = channel - 2`)
+  - *Other channels:* Ignored by parser.
+- **Note Event (4 Bytes for note channels 2..8):**
+  - `val` (`int16`), `vol_pan` (`uint8`), `n_type` (`uint8`).
+  - Code extracts the note flag as `n_type % 4`:
+    - `0`: Normal tap note
+    - `2`: Long Note (LN) hold head
+    - `3`: Long Note (LN) hold tail
 
 ### Hard Difficulty Isolation:
-The `.ojn` container encapsulates Easy, Normal, and Hard charts sequentially in one binary file. The parser seeks strictly to `hard_offset = struct.unpack('<i', h[292:296])[0]` and reads up to `cover_off = struct.unpack('<i', h[296:300])[0]`. This ensures Hard charts are cleanly isolated without inadvertently merging preceding Easy/Normal notes into the event stream.
+The `.ojn` container encapsulates Easy, Normal, and Hard charts sequentially in one binary file. The parser seeks strictly to `hard_offset = struct.unpack('<i', h[292:296])[0]` and reads up to `cover_off = struct.unpack('<i', h[296:300])[0]`.
+
+> [!WARNING]
+> **Known Issue:** If the Hard seek pointer is invalid (`hard_off < 300` or `hard_off >= file_len`), the parser currently falls back to `hard_off = 300` (the beginning of the file's note data). This causes Easy, Normal, and Hard notes to be merged together into a single corrupted chart. This fallback is a known bug to be addressed by rejecting invalid files.
 
 Hold notes are paired by matching opening `0x02` events with their succeeding `0x03` event on the same lane, directly outputting start and release timestamps in milliseconds.
 
@@ -54,9 +62,11 @@ Hold notes are paired by matching opening `0x02` events with their succeeding `0
 ## 3. Robust Deduplication & Priority Rules
 
 Many charts exist across multiple servers under different rating iterations. To prevent identical or converter-shifted note patterns from entering both training and validation sets:
-1. **Multi-Factor Deduplication Check:**
-   - **Bitwise match:** $\text{Hash}_1 == \text{Hash}_2$ (exact MD5 match of the 50 FPS quantized note grid).
-   - **Converter-shift tolerance:** Identical note count ($\text{Notes}_1 == \text{Notes}_2$) + duration tolerance ($|\Delta t| \le 2.0\text{s}$) + title token overlap or matching level rating. This catches converter artifacts where 1 or 2 notes were quantized by 1 frame (20ms) across formats.
+1. **Multi-Factor Deduplication Check (`are_charts_duplicate`):**
+   - **Bitwise match:** Exact MD5 match of the 50 FPS quantized note grid (`c1["grid_hash"] == c2["grid_hash"]`).
+   - **Candidate matching:** Must have identical note count (`c1["note_count"] == c2["note_count"]`) and duration within 2.0s ($|\Delta \text{duration}| \le 2000\text{ ms}$).
+   - **Title token match:** If title token sets (alphanumeric and CJK/Hangul tokens, excluding common terms like `o2jam`, `hard`, `mix`, etc.) overlap between candidates, they are marked duplicate.
+   - **Fallback match:** If note count and duration match, level ratings are identical, and duration is within 0.5s ($|\Delta \text{duration}| \le 500\text{ ms}$), the charts are marked duplicate.
 2. **Duplicate collisions are resolved strictly by source authority:**
    $$\text{Private Server Native (0)} > \text{osu! DMJAM (1)} > \text{NSJAM Native (2)} > \text{osu! O2EZ (3)}$$
    Uncorrupted native `.ojn` files always take precedence over text-converted `.osu` files.
@@ -65,11 +75,11 @@ Many charts exist across multiple servers under different rating iterations. To 
 
 ## 4. Packing Format (`data/o2jam_dataset.npz`)
 
-For maximum GPU loading throughput, charts are packed into a single contiguous 1D array with index offsets:
-- `flat_grids`: `uint8` 1D array storing all concatenated `(T, 7)` grids.
+For training efficiency, all charts are serialized into a compressed NumPy archive:
+- `flat_grids`: `uint8` 1D array storing all concatenated `(T, 7)` grids. Total size: 257,789,875 elements (~245.8 MB uncompressed in memory).
 - `offsets`: `int64` array of size $N + 1$ marking chart boundaries in `flat_grids`.
 - `lengths`: `int32` array of frame counts $T$ for each chart.
 - `levels`: `float32` target difficulty levels.
 - `durations`: `int32` song durations in milliseconds.
 
-Total uncompressed size: **~20.4 MB**, allowing instantaneous zero-copy memory-mapped loading in PyTorch.
+The archive is saved via `np.savez_compressed` (occupying ~20.4 MB on disk) and loaded into memory using `np.load` (fully decompressed into RAM rather than memory-mapped).

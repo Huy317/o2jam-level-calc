@@ -1,6 +1,6 @@
 # O2Jam 7K Level Predictor
 
-Predicts O2Jam difficulty levels (Lv. 4 to Lv. 180+) for 7-key osu!mania charts using a neural network trained on ~4,400 O2Jam and community charts.
+Predicts O2Jam difficulty levels (Lv. 4 to Lv. 180) for 7-key osu!mania charts using a neural network trained on 4,423 O2Jam and community charts.
 
 Includes a lightweight in-game overlay for [tosu](https://github.com/KotRikD/tosu) that displays the estimated level in real time while playing or browsing songs.
 
@@ -67,26 +67,26 @@ Example output:
 
 Standard rhythm game star rating algorithms often struggle to capture O2Jam difficulty curves because O2Jam charts rely heavily on long-note density, asymmetric chord jacks, and prolonged stamina drain.
 
-This model bypasses traditional heuristics by learning directly from chart structure:
+This model learns directly from raw chart structure:
 
 1. **Note Grid Input:** The chart is converted into a discrete 20ms time-grid across all 7 columns, distinguishing taps, hold heads, hold bodies, and releases.
-2. **Convolutional Kinematics:** 1D convolutions extract local pattern density, hand alternation, and jack intervals across multiple receptive fields.
-3. **Temporal Pooling:** Combines sustain-damped 2s burst intensity, 5s phrase density, 15s climax phrases, and peak-relative active stamina gating into a final bounded rating.
-4. **Clean Dataset:** Trained on 4,423 deduplicated O2Jam charts (DMJAM, NSJAM, O2EZ, and private server archives), filtered to eliminate dummy labels and corrupt files.
+2. **Dilated CNN Backbone:** 1D dilated residual convolutions extract pattern density, chord transitions, and repetitive jack strain across a wide receptive field (~10.1 seconds / 505 frames).
+3. **Multi-Scale Pooling & Gating:** Combines sustain-damped 2s burst pooling, 5s phrase density, 15s climax pooling, and peak-relative active stamina gating into a bounded linear-core Double-Softplus rating (`[1.0, 195.0]`).
+4. **Clean Dataset:** Evaluated across 4,423 deduplicated O2Jam charts (from osu! converts, NSJAM, and private server archives), filtered to eliminate dummy labels and corrupt files.
 
 ### Benchmark Summary
 
-Tested across all 4,423 clean charts:
+The primary benchmark is evaluated on the held-out validation split (15%, $n=664$ charts, unseen during training). Full-dataset metrics ($n=4,423$, which include the 85% training set) are provided as secondary reference.
 
-| Metric | Result |
-| :--- | :--- |
-| **Pearson Correlation ($R$)** | **0.9785** |
-| **Median Absolute Error (P50)** | **$\le 3.55$ levels** |
-| **75th Percentile Error (P75)** | **$\le 6.64$ levels** |
-| **Mean Absolute Error (MAE)** | **5.26 levels** |
-| **Overall RMSE** | **7.48 levels** |
+| Metric | Held-Out Validation ($n=664$) | Full Dataset ($n=4,423$, 85% Train) |
+| :--- | :---: | :---: |
+| **Mean Absolute Error (MAE)** | **5.86 levels** | 5.26 levels |
+| **Root Mean Squared Error (RMSE)** | **8.34 levels** | 7.48 levels |
+| **Pearson Correlation ($R$)** | **0.9765** | 0.9800 |
+| **Median Absolute Error (P50)** | **$\le 4.17$ levels** | $\le 3.72$ levels |
+| **90th Percentile Error (P90)** | **$\le 13.00$ levels** | $\le 11.62$ levels |
 
-Detailed tier breakdowns and outlier evaluations are documented in [`docs/benchmarks.md`](docs/benchmarks.md).
+Comprehensive validation tables, tier breakdowns, and duration analysis are documented in [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ---
 
@@ -98,12 +98,14 @@ o2jam-level-calc/
 │   ├── overview.md            # System architecture and data pipeline
 │   ├── architecture.md        # Neural network layers and strain channels
 │   ├── dataset.md             # Data sources, binary .ojn parsing & deduplication
-│   └── benchmarks.md          # Benchmark results and error breakdowns
+│   ├── benchmarks.md          # Benchmark results and error breakdowns
+│   └── extension.md           # Tosu overlay installation and configuration
 ├── scripts/                   # Training and analysis scripts
 │   ├── step1_inspect.py       # Scans and validates input charts
 │   ├── step2_build_dataset.py # Generates numpy arrays from .osu and .ojn
 │   ├── step3_train.py         # PyTorch training and ONNX export
 │   ├── predict.py             # CLI single-chart predictor
+│   ├── analyze_errors.py      # PyTorch error analysis (currently broken)
 │   └── analyze_errors_onnx.py # Full ONNX benchmark suite
 ├── extension/                 # Standalone tosu static overlay
 │   └── o2jam_level_predictor/ # Ready to drop into tosu/static/
@@ -119,6 +121,7 @@ o2jam-level-calc/
 - [Model Architecture](docs/architecture.md)
 - [Dataset & Deduplication](docs/dataset.md)
 - [Benchmarks & Error Analysis](docs/benchmarks.md)
+- [Tosu Extension](docs/extension.md)
 
 ---
 

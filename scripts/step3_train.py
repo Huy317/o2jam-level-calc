@@ -2,7 +2,7 @@
 Step 3: Train O2Jam 7K Level Predictor on Unified Dataset (4,423 charts).
 Model v5 Architecture:
   - 60 input channels (35 one-hot states + 2 counts + 23 kinematic channels)
-  - 6 Residual Conv1D blocks (dilations 1, 2, 4, 8, 16, 32) -> ~5.06s receptive field
+  - 6 Residual Conv1D blocks (dilations 1, 2, 4, 8, 16, 32) -> ~10.1s receptive field
   - Sustain-damped 2s burst pooling + 5s phrase + 15s climax
   - Peak-relative active gating & stamina duration volume (eliminates marathon dilution)
   - Linear-core Double-Softplus bounded output [1.0, 195.0] (eliminates sigmoid curvature sag)
@@ -134,13 +134,13 @@ class O2JamLevelPredictor(nn.Module):
             nn.GELU(),
         )
 
-        # 6 Dilated Residual blocks covering receptive field up to ~5.0 seconds
-        self.block1 = ResidualBlock1D(channels, kernel_size=5, dilation=1)   # rf: 5 (100ms)
-        self.block2 = ResidualBlock1D(channels, kernel_size=5, dilation=2)   # rf: 13 (260ms)
-        self.block3 = ResidualBlock1D(channels, kernel_size=5, dilation=4)   # rf: 29 (580ms)
-        self.block4 = ResidualBlock1D(channels, kernel_size=5, dilation=8)   # rf: 61 (1.22s)
-        self.block5 = ResidualBlock1D(channels, kernel_size=5, dilation=16)  # rf: 125 (2.50s)
-        self.block6 = ResidualBlock1D(channels, kernel_size=5, dilation=32)  # rf: 253 (5.06s)
+        # 6 Dilated Residual blocks covering receptive field up to ~10.1 seconds
+        self.block1 = ResidualBlock1D(channels, kernel_size=5, dilation=1)   # rf: 9 (180ms)
+        self.block2 = ResidualBlock1D(channels, kernel_size=5, dilation=2)   # rf: 25 (500ms)
+        self.block3 = ResidualBlock1D(channels, kernel_size=5, dilation=4)   # rf: 57 (1.14s)
+        self.block4 = ResidualBlock1D(channels, kernel_size=5, dilation=8)   # rf: 121 (2.42s)
+        self.block5 = ResidualBlock1D(channels, kernel_size=5, dilation=16)  # rf: 249 (4.98s)
+        self.block6 = ResidualBlock1D(channels, kernel_size=5, dilation=32)  # rf: 505 (10.10s)
 
         # Attention pooling scoring layer
         self.attn_conv = nn.Conv1d(channels, 1, kernel_size=1)

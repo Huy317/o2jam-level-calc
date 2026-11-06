@@ -2,105 +2,149 @@
 
 ## 1. Input Representation (60 Kinematic Channels)
 
-Each beatmap is accepted as a discrete 2D time grid $(T, 7)$ sampled at **$20\text{ms}$ steps ($50\text{ FPS}$)**, where $T$ is the number of time frames. At each 20ms step, every lane contains one of 5 categorical states:
+Each beatmap is accepted as a discrete 2D time grid $(T, 7)$ sampled at **20 ms steps (50 FPS)**, where $T$ is the number of time frames. At each 20 ms step, every lane contains one of 5 categorical states:
 - `0`: Empty (no note active)
 - `1`: Tap Note (instantaneous strike)
 - `2`: Long Note Head (start of hold)
 - `3`: Long Note Body (ongoing hold)
 - `4`: Long Note Tail (release)
 
-To provide the model with explicit biomechanical and physical execution awareness while maintaining a compact `(B, T, 7)` uint8 input representation for WebAssembly inference, **60 continuous kinematic channels** are derived directly inside the PyTorch `forward()` pass:
+To provide the model with explicit execution context while maintaining a compact `(B, T, 7)` uint8 input representation for WebAssembly inference, **60 continuous kinematic channels** are derived directly inside the PyTorch `forward()` pass:
 
 ```
 Input Grid: (B, T, 7) uint8
   │
   ├─> 1. Categorical One-Hot: 7 lanes × 5 states = 35 channels
   ├─> 2. Macro Aggregate Channels:
-  │       • Attack Count (strikes at frame t: states 1 or 2) = 1 channel
-  │       • Hold Count   (active holds at frame t: states 2 or 3) = 1 channel
+  │       • taps_sum  (strikes at frame t: states 1 or 2) = 1 channel
+  │       • holds_sum (active holds at frame t: states 2 or 3) = 1 channel
   ├─> 3. Per-Lane Continuous Kinematic Channels:
-  │       • Jack Velocity: v_jack = min(1.0, 50ms / Δt_press) = 7 channels
-  │       • LN Release-to-Press Gap Velocity: v_gap = min(1.0, 50ms / Δt_gap) = 7 channels
-  │       • Pinned-Finger Tension: concurrent hold duration = 7 channels
-  └─> 4. Hand-Split Alternation Dynamics:
-          • Left Hand Delta (lanes 1–3) = 1 channel
-          • Right Hand Delta (lanes 5–7) = 1 channel
+  │       • tension: (other lanes holding / 6) at event frames = 7 channels
+  │       • jacks: hits × depthwise conv over previous 4 frames = 7 channels
+  │       • rel_gaps: hits × release conv over previous 4 frames = 7 channels
+  └─> 4. Hand-Split Roll Dynamics:
+          • l_roll (lanes 1–3 hit count × 2-frame lookback conv) = 1 channel
+          • r_roll (lanes 5–7 hit count × 2-frame lookback conv) = 1 channel
   │
   ▼
 Expanded Feature Tensor: (B, 60, T)
 ```
 
-The continuous kinematic channels differentiate human mechanical strain:
-- A 320 BPM burst (40ms interval) produces high-velocity jack/roll values distinct from standard 160 BPM streams.
-- Pinned fingers during complex hold patterns are tracked explicitly, separating single-finger strain from free-hand multi-finger streams.
+The channels are concatenated in the following order: `one_hot` (35), `taps_sum` (1), `holds_sum` (1), `tension` (7), `jacks` (7), `rel_gaps` (7), `l_roll` (1), `r_roll` (1), totaling 60 channels:
+
+1. **Categorical One-Hot (35 channels):** 7 lanes $\times$ 5 states.
+2. **Chord Aggregates (2 channels):** `taps_sum` sums instantaneous strikes (states 1, 2) across all 7 lanes; `holds_sum` sums active holds (states 2, 3) across all 7 lanes.
+3. **Pinned-Finger Tension (7 channels):** Tracks concurrent hold strain per lane:
+   $$\text{tension}_i(t) = \frac{\text{holds\_sum}(t) - \text{holds}_i(t)}{6.0} \cdot \mathbb{I}(\text{lane}_i(t) \in \{1, 2, 4\})$$
+   Evaluated strictly when lane $i$ undergoes an action (tap press, LN head press, or LN tail release).
+4. **Same-Lane Jack Velocity (7 channels):** Computed per lane via depthwise 1D convolution over `hits` with a static 4-frame kernel $w = [0.25, 0.50, 0.75, 1.00]$ (most recent prior frame has weight 1.0), gated by hits at the current frame:
+   $$\text{jacks}_i(t) = \text{hits}_i(t) \cdot (\text{padded\_hits}_i * w)(t)$$
+   *Known limitation:* The 4-frame lookback window covers only 20–80 ms prior to the hit, which captures 1/4 jacks above ~188 BPM but does not cover slower jacks (100–250 ms).
+5. **LN Release-to-Press Gaps (7 channels):** Applies the same 4-frame kernel $w$ to releases (state 4), gated by hits at the current frame:
+   $$\text{rel\_gaps}_i(t) = \text{hits}_i(t) \cdot (\text{padded\_releases}_i * w)(t)$$
+   Shares the same 20–80 ms window limitation as the jack channel.
+6. **Hand-Split Roll Dynamics (2 channels):** Evaluates same-hand hit density for the left hand (lanes 1–3) and right hand (lanes 5–7), excluding center lane 4:
+   $$l_{\text{roll}}(t) = l_{\text{hits}}(t) \cdot (\text{padded\_}l * [0.5, 1.0])(t)$$
+   $$r_{\text{roll}}(t) = r_{\text{hits}}(t) \cdot (\text{padded\_}r * [0.5, 1.0])(t)$$
+   This produces a 40 ms roll density per hand rather than a spatial coordinate delta.
 
 ---
 
 ## 2. Receptive Field & Dilated Residual Backbone
 
-Difficulty in 7K rhythm games depends on both **micro-patterns** (trills, jacks, rolling staircases spanning 100ms - 500ms) and **macro-stamina** (dense 30 NPS chordstreams lasting 5 - 15 seconds).
+Difficulty in 7K rhythm games depends on both micro-patterns (trills, jacks, rolls) and macro-stamina (sustained high-NPS streams).
 
-To capture both without temporal downsampling, the network utilizes **6 Dilated Residual 1D Convolutional Blocks** with exponentially increasing dilation factors:
+To capture temporal structure without downsampling, the network uses a 1D convolution stem followed by **6 Dilated Residual 1D Convolutional Blocks**:
+- **Stem:** `Conv1D(60, 128, kernel_size=1, bias=False)` $\rightarrow$ `BatchNorm1d` $\rightarrow$ `GELU`.
+- **Residual Blocks:** Each block contains two dilated conv layers with kernel size $K=5$, padding $2d$, batch normalization, and GELU activations. GELU is applied after the residual addition; no dropout is used inside the residual blocks:
+  $$\text{Conv1D}(K=5, d) \rightarrow \text{BatchNorm1d} \rightarrow \text{GELU} \rightarrow \text{Conv1D}(K=5, d) \rightarrow \text{BatchNorm1d} + \text{Residual} \rightarrow \text{GELU}$$
 
-| Block | Kernel Size ($K$) | Dilation ($d$) | Stride | Receptive Field Growth | Cumulative Context Window |
+Each convolution with kernel size $K=5$ and dilation $d$ expands the receptive field by $(K-1) \cdot d = 4d$ frames. With two convolutions per block, each ResBlock adds $8d$ frames:
+
+| Block | Kernel Size ($K$) | Dilation ($d$) | Convs / Block | Receptive Field Growth | Cumulative Context Window |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Stem** | 5 | 1 | 1 | 4 frames | 80 ms |
-| **ResBlock 1** | 3 | 1 | 1 | $2 \times (3-1) \times 1 = 4$ frames | 160 ms |
-| **ResBlock 2** | 3 | 2 | 1 | $2 \times (3-1) \times 2 = 8$ frames | 320 ms |
-| **ResBlock 3** | 3 | 4 | 1 | $2 \times (3-1) \times 4 = 16$ frames | 640 ms |
-| **ResBlock 4** | 3 | 8 | 1 | $2 \times (3-1) \times 8 = 32$ frames | 1,280 ms (1.28s) |
-| **ResBlock 5** | 3 | 16 | 1 | $2 \times (3-1) \times 16 = 64$ frames | 2,560 ms (2.56s) |
-| **ResBlock 6** | 3 | 32 | 1 | $2 \times (3-1) \times 32 = 128$ frames | **5,120 ms (5.12s)** |
+| **Stem** | 1 | 1 | 1 | 1 frame | 20 ms |
+| **ResBlock 1** | 5 | 1 | 2 | $2 \times 4 \times 1 = 8$ frames | 9 frames (180 ms) |
+| **ResBlock 2** | 5 | 2 | 2 | $2 \times 4 \times 2 = 16$ frames | 25 frames (500 ms) |
+| **ResBlock 3** | 5 | 4 | 2 | $2 \times 4 \times 4 = 32$ frames | 57 frames (1,140 ms / 1.14 s) |
+| **ResBlock 4** | 5 | 8 | 2 | $2 \times 4 \times 8 = 64$ frames | 121 frames (2,420 ms / 2.42 s) |
+| **ResBlock 5** | 5 | 16 | 2 | $2 \times 4 \times 16 = 128$ frames | 249 frames (4,980 ms / 4.98 s) |
+| **ResBlock 6** | 5 | 32 | 2 | $2 \times 4 \times 32 = 256$ frames | **505 frames (10,100 ms ≈ 10.1 s)** |
 
-Each block consists of:
-$$\text{Conv1D}(d) \rightarrow \text{BatchNorm1d} \rightarrow \text{ReLU} \rightarrow \text{Dropout}(0.1) \rightarrow \text{Conv1D}(d) \rightarrow \text{BatchNorm1d} + \text{Residual}$$
-
-Total receptive field per frame is **253 frames $\approx 5.06$ seconds**, encompassing full musical phrases, chordstream transitions, and sustained anchor patterns.
+Total receptive field per frame is **505 frames $\approx 10.1$ seconds** ($1 + 8 \times 63 = 505$ frames at 20 ms/frame).
 
 ---
 
-## 3. Sustain-Damped Burst Pooling & Peak-Relative Active Gating
+## 3. Multi-Scale Pooling & Peak-Relative Active Gating
 
-Rhythm game charts cannot be judged purely by peak density or global averages:
-- A 4-minute chart with intense Lv. 80 chordstreams should not have its rating watered down by 2 minutes of calm vocals or intros.
-- Conversely, an isolated 1-second mash gimmick should not trigger runaway difficulty inflation.
+Difficulty cannot be evaluated purely by local density spikes or whole-song global averages. The pooling stage extracts temporal features across multiple scales while suppressing isolated gimmicks and quiet sections:
 
-To solve both challenges simultaneously, the pooling stage combines three mechanisms:
+### 1. Multi-Scale Windowed Averages:
+Temporal average pooling is evaluated across three window sizes:
+- `p2`: kernel 100 frames (2.0s), stride 25 frames (0.5s), padding 50 frames (1.0s), max over time $\rightarrow (B, 128)$.
+- `p5`: kernel 250 frames (5.0s), stride 25 frames (0.5s), padding 125 frames (2.5s), max over time $\rightarrow (B, 128)$.
+- `p15`: kernel 750 frames (15.0s), stride 50 frames (1.0s), padding 375 frames (7.5s), max over time $\rightarrow (B, 128)$.
 
-### 1. Sustain-Damped 2-Second Burst (`p2_damped`):
-Multi-scale temporal pooling extracts 2.0s (`p2`), 5.0s (`p5`), and 15.0s (`p15`) windowed peaks. The 2s burst excess is gated by its surrounding 5s phrase context:
+Burst excess is damped using the surrounding 5s phrase context:
 $$\text{excess} = \text{ReLU}(p_2 - p_5)$$
 $$p_{2\text{,damped}} = p_5 + \text{excess} \cdot \tanh\left(\frac{|p_5|}{\text{excess} + 0.1}\right)$$
-In legitimate high-difficulty charts, a 2s burst sits inside an active musical phrase, allowing the burst to pass through. In isolated gimmick mashes surrounded by silence, $p_5 \approx 0$ damps the spike completely.
 
-### 2. Peak-Relative Active Gating (`active_gap` & `stamina_vol`):
-Instead of whole-song global average pooling (which dilutes long marathon charts), frames are gated relative to the chart's own peak strain $s_{\text{peak}}$:
-$$g(t) = \sigma\left(\frac{s(t) - 0.65 \cdot s_{\text{peak}}}{0.10 \cdot s_{\text{peak}} + \epsilon}\right) \cdot \text{mask}(t)$$
-- **Active Feature Average (`active_gap`):** Averages features strictly across windows exceeding 65% of peak intensity, making technical difficulty immune to long quiet intros/outros.
-- **Stamina Duration Volume (`stamina_vol`):** Computes $\log(1 + T_{\text{active}})$, providing a monotonic measure of sustained climax duration in seconds.
+### 2. Peak-Relative Active Gating:
+Instantaneous strain $s(t)$ is projected through a 1D convolutional head:
+$$s_{\text{raw}} = \text{Softplus}(\text{Conv1D}_{1\times 1}(\text{GELU}(\text{Conv1D}_{1\times 1}(\text{feat})))) \cdot \text{mask}$$
+with the output layer bias initialized to $-2.0$. Letting $s_{\text{peak}} = \max_t(s_{\text{raw}})$, frames are gated relative to peak intensity:
+$$g(t) = \sigma\left(\frac{s_{\text{raw}}(t) - 0.65 \cdot s_{\text{peak}}}{0.10 \cdot s_{\text{peak}} + 10^{-5}}\right) \cdot \text{mask}(t)$$
+From this gate, three summary representations are derived:
+- **Active Feature Average (`active_gap`):** $\frac{\sum_t \text{feat}(t) \cdot g(t)}{\sum_t g(t)} \rightarrow (B, 128)$, averaging features over windows exceeding 65% of peak intensity.
+- **Active Strain Mean ($s_{\text{active\_mean}}$):** $\frac{\sum_t s_{\text{raw}}(t) \cdot g(t)}{\sum_t g(t)}$ scalar.
+- **Stamina Duration Volume (`stamina_vol`):** $\log(1 + T_{\text{active}} \times 0.02)$ scalar, measuring active climax duration in log-seconds.
 
 ### 3. Masked Attention Pooling:
-Global attention pooling assigns learned softmax weights across all valid frames without padding leakage.
+Global attention pooling computes learned softmax weights via a `Conv1D(128, 1, kernel_size=1)` scoring layer over masked frames $\rightarrow$ `attn_pool` $(B, 128)$.
+
+### 4. Pooled Representation:
+The MLP head receives a concatenated vector of **5 channel vectors (128 dims each) + 3 summary scalars** (total dimension = $5 \times 128 + 3 = 643$):
+$$\text{pooled} = [p_{2\text{,damped}}, p_5, p_{15}, \text{active\_gap}, \text{attn\_pool}, s_{\max} \cdot 0.01, s_{\text{active\_mean}} \cdot 0.01, \text{stamina\_vol}]$$
 
 ---
 
 ## 4. Linear-Core Double-Softplus Regression Head
 
-Early architectures used either a Sigmoid head (which suffered from second-order curvature sagging in the dense Lv. 75–90 bracket) or an unbounded Softplus head (which caused runaway extrapolation above Lv. 180).
+The regression head consists of a 3-layer MLP:
+$$\text{Linear}(643, 256) \rightarrow \text{GELU} \rightarrow \text{Dropout}(0.2) \rightarrow \text{Linear}(256, 128) \rightarrow \text{GELU} \rightarrow \text{Dropout}(0.1) \rightarrow \text{Linear}(128, 1)$$
 
-Model v5 utilizes a **Centered Double-Softplus formulation**:
-$$z = 76.5 + 30.0 \cdot \text{raw}$$
+To map the unconstrained scalar $\text{raw}$ to the valid level range $[1.0, 195.0]$, the model uses a centered Double-Softplus transform:
+$$z = 75.0 + 30.0 \cdot \text{raw}$$
 $$\hat{y} = L_{\min} + \tau_{\text{low}} \cdot \text{Softplus}\left(\frac{z - L_{\min}}{\tau_{\text{low}}}\right) - \tau_{\text{high}} \cdot \text{Softplus}\left(\frac{z - L_{\max}}{\tau_{\text{high}}}\right)$$
 where $L_{\min} = 1.0, \tau_{\text{low}} = 5.0, L_{\max} = 195.0, \tau_{\text{high}} = 20.0$.
 
-### Why This Works:
-1. **Zero S-Curve Sag:** The derivative $\frac{d\hat{y}}{dz} \approx 1.0$ across the entire human spectrum from **Lv. 15 to Lv. 140**, completely eliminating inflection-point distortion.
-2. **Smooth Asymptotic Ceiling:** Between Lv. 145 and Lv. 195, the upper softplus smoothly compresses predictions toward $L_{\max} = 195.0$, making runaway explosions mathematically impossible.
+- **Linear Core:** The derivative $\frac{d\hat{y}}{dz} \approx 1.0$ across the primary difficulty spectrum from Lv. 15 to Lv. 140, avoiding inflection-point compression.
+- **Asymptotic Bounds:** Softplus transitions provide a smooth floor near $L_{\min} = 1.0$ and smooth ceiling compression toward $L_{\max} = 195.0$.
 
 ---
 
-## 5. Dual ONNX Model Outputs
+## 5. Loss Function (`compute_loss`)
+
+The training objective optimizes a composite loss combining point prediction, pairwise slope preservation, and strain calibration:
+$$\mathcal{L} = \mathcal{L}_{\text{point}} + 0.25 \cdot \mathcal{L}_{\text{rank}} + 0.10 \cdot \mathcal{L}_{\text{strain}}$$
+
+1. **Targeted Asymmetric Point Loss ($\mathcal{L}_{\text{point}}$):**
+   Base loss is Smooth L1 ($\beta = 1.0$) between prediction $\hat{y}$ and label $y$. An asymmetric penalty multiplier $w_{\text{asym}}$ is applied when under-predicting ($\hat{y} < y$):
+   $$w_{\text{asym}} = 1.0 + \mathbb{I}(\hat{y} < y) \cdot (0.40 \cdot f_{\text{mid}} + 0.35 \cdot f_{\text{marathon}})$$
+   where:
+   - $f_{\text{mid}} = \exp\left(-0.5 \left(\frac{y - 82.0}{9.0}\right)^2\right)$ targets under-predictions around Lv. 70–92 (Gaussian centered at Lv. 82, $\sigma = 9$).
+   - $f_{\text{marathon}} = \sigma\left(\frac{T_{\text{sec}} - 150.0}{30.0}\right) \cdot \sigma\left(\frac{105.0 - y}{5.0}\right)$ penalizes stamina under-predictions on marathon charts (>150s) at Lv. $\le 105$.
+2. **Pairwise Slope Preservation Loss ($\mathcal{L}_{\text{rank}}$, weight 0.25):**
+   Evaluates Smooth L1 ($\beta = 1.0$) between predicted pairwise differences $(\hat{y}_i - \hat{y}_j)$ and target differences $(y_i - y_j)$ for all pairs in the batch whose level difference satisfies $5.0 \le |y_i - y_j| \le 45.0$. This penalizes non-linear scaling across difficulty brackets.
+3. **Auxiliary Strain Calibration Loss ($\mathcal{L}_{\text{strain}}$, weight 0.10):**
+   Anchors the HUD strain curve to ground-truth difficulty units:
+   $$s_{\text{eff}} = 0.70 \cdot s_{\text{peak}} + 0.30 \cdot s_{\text{mean}}$$
+   $$\mathcal{L}_{\text{strain}} = \text{SmoothL1}(s_{\text{eff}}, y; \beta=2.0)$$
+
+---
+
+## 6. Dual ONNX Model Outputs
 
 The exported ONNX model (`model.onnx`, 4.60 MB) provides two simultaneous outputs:
 1. `predicted_level` (`shape: [batch_size]`): Single scalar predicted O2Jam level.
-2. `strain_curve` (`shape: [batch_size, timeline_steps]`): Instantaneous difficulty strain curve across song duration (1 sample per second), calibrated to true level units and consumed directly by overlay clients.
+2. `strain_curve` (`shape: [batch_size, timeline_steps]`): Instantaneous difficulty strain curve across song duration (1 sample per second via `avg_pool1d(kernel_size=50, stride=50, ceil_mode=True)`), calibrated to true level units for HUD overlay visualization.
