@@ -2,16 +2,17 @@
 
 ## 1. Data Sources & Composition
 
-The training dataset integrates **3,997 unique 7-key charts** across three major O2Jam server rating systems, with uncompressed native `.ojn` files taking priority over `.osu` text converts:
+The training dataset integrates **4,423 unique 7-key charts** across four major O2Jam server rating systems, with uncompressed native `.ojn` files taking priority over `.osu` text converts:
 
-| Source | File Format | Role / Server Context | Unique Charts |
-| :--- | :--- | :--- | :---: |
-| **Private Server Native** | `.ojn` native binary | Uncorrupted master charts from community channels (`DSong`, `ESong`, `HSong`, `NSong`) | 2,367 |
-| **NSJAM Native** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,269 |
-| **osu! DMJAM Converts** | `.osu` converts | osu!mania 7K DMJAM conversions (`[E]`, `[N]`, `[H]`, `[D]`) | 361 |
-| **Total** | — | **Deduplicated Unified Dataset** | **3,997** |
+| Source | Priority ID | File Format | Role / Server Context | Unique Charts |
+| :--- | :---: | :--- | :--- | :---: |
+| **Private Server Native** | `0` | `.ojn` native binary | Uncorrupted master charts from community channels (`DSong`, `ESong`, `HSong`, `NSong`) | 2,367 |
+| **NSJAM Native** | `1` | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,269 |
+| **osu! DMJAM Converts** | `2` | `.osu` converts | osu!mania 7K DMJAM conversions (`[E]`, `[N]`, `[H]`, `[D]`) | 361 |
+| **osu! O2EZ Converts** | `3` | `.osu` converts | Legacy O2EZ conversions (`[O2EZ]`, calibrated via train-only server adapter) | 426 |
+| **Total** | — | — | **Deduplicated Unified Dataset** | **4,423** |
 
-Charts with level $\le 3$, fewer than 20 notes, or `[O2EZ]` tags (excluded due to systematic $-2.1$ level offset and higher rating variance) are filtered out during parsing.
+Charts with level $\le 3$ or fewer than 20 notes are filtered out during parsing.
 
 ### Credits
 - DMJAM & O2EZ charts provided by the [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975).
@@ -65,7 +66,7 @@ Many charts exist across multiple servers under different rating iterations. To 
    - **Title token match:** If title token sets (alphanumeric and CJK/Hangul tokens, excluding common terms like `o2jam`, `hard`, `mix`, etc.) overlap between candidates, they are marked duplicate.
    - **Fallback match:** If note count and duration match, level ratings are identical, and duration is within 0.5s ($|\Delta \text{duration}| \le 500\text{ ms}$), the charts are marked duplicate.
 2. **Duplicate collisions are resolved strictly by source authority:**
-   $$\text{Private Server Native (0)} > \text{NSJAM Native (1)} > \text{osu! DMJAM (2)}$$
+   $$\text{Private Server Native (0)} > \text{NSJAM Native (1)} > \text{osu! DMJAM (2)} > \text{osu! O2EZ (3)}$$
    Uncorrupted native `.ojn` files always take precedence over text-converted `.osu` files.
 
 ---
@@ -73,10 +74,31 @@ Many charts exist across multiple servers under different rating iterations. To 
 ## 4. Packing Format (`data/o2jam_dataset.npz`)
 
 For training efficiency, all charts are serialized into a compressed NumPy archive:
-- `flat_grids`: `uint8` 1D array storing all concatenated `(T, 7)` grids. Total size: 227,892,707 elements (~217.34 MB uncompressed in memory).
+- `flat_grids`: `uint8` 1D array storing all concatenated `(T, 7)` grids. Total size: 257,789,868 elements (~245.85 MB uncompressed in memory).
 - `offsets`: `int64` array of size $N + 1$ marking chart boundaries in `flat_grids`.
 - `lengths`: `int32` array of frame counts $T$ for each chart.
 - `levels`: `float32` target difficulty levels.
 - `durations`: `int32` song durations in milliseconds.
+- `priorities`: `int32` array of source priority IDs (`0` = Private, `1` = NSJAM, `2` = DMJAM, `3` = O2EZ).
 
-The archive is saved via `np.savez_compressed` (occupying ~18.02 MB on disk) and loaded into memory using `np.load` (fully decompressed into RAM rather than memory-mapped).
+The archive is saved via `np.savez_compressed` (occupying ~20.38 MB on disk) and loaded into memory using `np.load` (fully decompressed into RAM rather than memory-mapped).
+
+---
+
+## 5. Expanding the Dataset with Old Servers (Multi-Server Calibration)
+
+Legacy O2Jam servers often exhibit non-linear rating offsets relative to modern `Private` server standards. For example, across 293 duplicate chart pairs, `O2EZ` matches modern ratings in `Lv. 75–95` ($\text{bias} = -0.14$), but underrates `Lv. 1–50` by $-5.09$ levels, `Lv. 50–75` by $-1.51$ levels, and `Lv. 95–150` by $-3.08$ levels.
+
+Simply dropping `O2EZ` removes ~10% of pattern diversity and hurts generalization, while training on raw unadjusted `O2EZ` labels pulls predictions down. We evaluated three strategies on the exact same `SEED=42` split:
+
+| Strategy | Canonical Val MAE ($n=613$, Private+NSJAM+DMJAM) | Canonical Val RMSE | Full Val MAE ($n=664$) | Full Val RMSE |
+| :--- | :---: | :---: | :---: | :---: |
+| **1. Raw Unadjusted Labels (`baseline_raw`)** | 5.683 | 8.801 | 5.707 | 8.778 |
+| **2. Static Duplicate-Pair Label Shift (`approach2_empirical`)** | 5.481 | 8.253 | 5.514 | 8.258 |
+| **3. Train-Only `ServerCalibrationAdapter` (`approach1_adapter`)** | **5.186** | **7.697** | **5.239** | **7.669** |
+
+### How to Add New Old Servers in the Future:
+1. **Assign a Priority ID (`4, 5, ...`):** In [`scripts/step2_build_dataset.py`](../scripts/step2_build_dataset.py), assign the new server a `PRIORITY_*` integer $> 0$ (below `PRIORITY_PRIVATE = 0` so canonical `Private` charts always win deduplication) and include its `priority` in `data/o2jam_dataset.npz`.
+2. **Check Duplicate Offsets:** Run `python scripts/step2_build_dataset.py` and inspect the printed `Cross-Source Duplicate Rating Offsets` table.
+3. **Train with `ServerCalibrationAdapter`:** In [`scripts/step3_train.py`](../scripts/step3_train.py), `ServerCalibrationAdapter(num_sources=...)` learns a 4-knot piecewise-linear offset curve (`knots = [35.0, 62.5, 85.0, 115.0]`) for every non-Private server (`priority > 0`) during training, while pinning `priority == 0` (`Private`) strictly to `0.0` offset.
+4. **Zero-Overhead ONNX Export:** At validation and ONNX export time, `ServerCalibrationAdapter` is discarded so `model.onnx` always outputs strictly on the canonical `Private` rating scale without needing a server ID input in the browser.

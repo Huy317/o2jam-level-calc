@@ -123,9 +123,14 @@ where $L_{\min} = 1.0, \tau_{\text{low}} = 5.0, L_{\max} = 195.0, \tau_{\text{hi
 
 ---
 
-## 5. Loss Function (`compute_loss`)
+## 5. Loss Function (`compute_loss`) & Train-Only Server Calibration (`ServerCalibrationAdapter`)
 
-The training objective optimizes a composite loss combining point prediction, pairwise slope preservation, and strain calibration:
+To absorb systematic grading offsets from secondary/legacy servers (such as `O2EZ`, which underrates `Lv. < 75` and `Lv. 95+` charts relative to `Private`) without altering the inference signature, [`scripts/step3_train.py`](../scripts/step3_train.py) uses a train-only **`ServerCalibrationAdapter`**:
+- The base network $f_\theta(\text{note\_grid})$ always predicts the canonical `Private` server difficulty $\hat{y}$.
+- During training only, `ServerCalibrationAdapter` evaluates a 4-knot piecewise-linear offset curve over knots $[35.0, 62.5, 85.0, 115.0]$ for each non-Private source (`priority > 0`), mapping $\hat{y} \rightarrow \hat{y}_{\text{server}} = \hat{y} + \Delta_{\text{priority}}(\hat{y})$ while keeping `Private` (`priority == 0`) strictly at $\Delta_0 \equiv 0$.
+- At validation and ONNX export time, `ServerCalibrationAdapter` is discarded so `model.onnx` predicts strictly on the canonical scale from `note_grid` alone.
+
+The training objective optimizes a composite loss combining point prediction (on $\hat{y}_{\text{server}}$), pairwise slope preservation, and strain calibration:
 $$\mathcal{L} = \mathcal{L}_{\text{point}} + 0.25 \cdot \mathcal{L}_{\text{rank}} + 0.10 \cdot \mathcal{L}_{\text{strain}}$$
 
 1. **Targeted Asymmetric Point Loss ($\mathcal{L}_{\text{point}}$):**

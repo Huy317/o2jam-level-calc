@@ -1,6 +1,6 @@
 # O2Jam 7K Level Predictor
 
-Predicts O2Jam difficulty levels (Lv. 4 to Lv. 180) for 7-key osu!mania charts using a neural network trained on 3,997 O2Jam and community charts.
+Predicts O2Jam difficulty levels (Lv. 4 to Lv. 180) for 7-key osu!mania charts using a neural network trained on 4,423 O2Jam and community charts.
 
 Includes a lightweight in-game overlay for [tosu](https://github.com/KotRikD/tosu) that displays the estimated level in real time while playing or browsing songs.
 
@@ -72,19 +72,19 @@ This model learns directly from raw chart structure:
 1. **Note Grid Input:** The chart is converted into a discrete 20ms time-grid across all 7 columns, distinguishing taps, hold heads, hold bodies, and releases.
 2. **Dilated CNN Backbone:** 1D dilated residual convolutions extract pattern density, chord transitions, and repetitive jack strain across a wide receptive field (~10.1 seconds / 505 frames).
 3. **Multi-Scale Pooling & Gating:** Combines sustain-damped 2s burst pooling, 5s phrase density, 15s climax pooling, and peak-relative active stamina gating into a bounded linear-core Double-Softplus rating (`[1.0, 195.0]`).
-4. **Clean Dataset:** Evaluated across 3,997 deduplicated O2Jam charts (from Private Server, NSJAM, and DMJAM archives, with priority `private > nsjam > dmjam` and noisy `o2ez` charts excluded).
+4. **Clean Multi-Server Dataset & Calibration:** Evaluated across 4,423 deduplicated O2Jam charts (`private > nsjam > dmjam > o2ez`), using a train-only `ServerCalibrationAdapter` to absorb legacy server grading offsets while exporting a zero-overhead canonical predictor.
 
 ### Benchmark Summary
 
-The primary benchmark is evaluated on the held-out validation split (15%, $n=600$ charts, unseen during training). Full-dataset metrics ($n=3,997$, which include the 85% training set) are provided as secondary reference.
+The primary benchmark is evaluated on the held-out validation split (15%, $n=664$ total / $n=613$ canonical `Private+NSJAM+DMJAM` charts, unseen during training). Full-dataset metrics ($n=4,423$, which include the 85% training set) are provided as secondary reference.
 
-| Metric | Held-Out Validation ($n=600$) | Full Dataset ($n=3,997$, 85% Train) |
-| :--- | :---: | :---: |
-| **Mean Absolute Error (MAE)** | **5.59 levels** | 4.96 levels |
-| **Root Mean Squared Error (RMSE)** | **8.01 levels** | 7.07 levels |
-| **Pearson Correlation ($R$)** | **0.9774** | 0.9838 |
-| **Median Absolute Error (P50)** | **$\le 3.78$ levels** | $\le 3.44$ levels |
-| **90th Percentile Error (P90)** | **$\le 13.12$ levels** | $\le 11.32$ levels |
+| Metric | Canonical Held-Out Val ($n=613$) | All Held-Out Val ($n=664$) | Full Dataset ($n=4,423$, 85% Train) |
+| :--- | :---: | :---: | :---: |
+| **Mean Absolute Error (MAE)** | **5.19 levels** | **5.24 levels** | 4.45 levels |
+| **Root Mean Squared Error (RMSE)** | **7.70 levels** | **7.67 levels** | 6.30 levels |
+| **Pearson Correlation ($R$)** | **0.9785** | **0.9772** | 0.9859 |
+| **Median Absolute Error (P50)** | **$\le 3.57$ levels** | **$\le 3.65$ levels** | $\le 3.26$ levels |
+| **90th Percentile Error (P90)** | **$\le 11.17$ levels** | **$\le 11.26$ levels** | $\le 9.42$ levels |
 
 Comprehensive validation tables, tier breakdowns, and duration analysis are documented in [`docs/benchmarks.md`](docs/benchmarks.md).
 

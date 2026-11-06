@@ -63,6 +63,7 @@ DMJAM_TAGS = {"[D]", "[H]", "[N]", "[E]"}
 PRIORITY_PRIVATE = 0
 PRIORITY_NSJAM = 1
 PRIORITY_DMJAM = 2
+PRIORITY_O2EZ = 3
 
 
 
@@ -116,9 +117,7 @@ def parse_osu_file(file_path):
     if level <= 3 or len(hit_objects) < 20:
         return None
 
-    if not any(tag in version_line for tag in DMJAM_TAGS):
-        return None
-    priority = PRIORITY_DMJAM
+    priority = PRIORITY_DMJAM if any(tag in version_line for tag in DMJAM_TAGS) else PRIORITY_O2EZ
 
     hit_objects.sort(key=lambda o: (o[0], o[1], o[2]))
     first_t = hit_objects[0][0]
@@ -396,11 +395,12 @@ def main():
 
     unique_charts = []
     discarded_duplicates = 0
-    priority_counts = {PRIORITY_PRIVATE: 0, PRIORITY_NSJAM: 0, PRIORITY_DMJAM: 0}
+    priority_counts = {PRIORITY_PRIVATE: 0, PRIORITY_NSJAM: 0, PRIORITY_DMJAM: 0, PRIORITY_O2EZ: 0}
     priority_labels = {
         PRIORITY_PRIVATE: "Private Server Native",
         PRIORITY_NSJAM: "NSJAM Native",
         PRIORITY_DMJAM: "osu! DMJAM",
+        PRIORITY_O2EZ: "osu! O2EZ",
     }
     cross_source_diffs = {}
 
@@ -429,6 +429,7 @@ def main():
     print(f"    - Private Server Native:           {priority_counts[PRIORITY_PRIVATE]:,} charts")
     print(f"    - NSJAM Native Server:             {priority_counts[PRIORITY_NSJAM]:,} charts")
     print(f"    - osu! DMJAM Server ([D],[H]...):  {priority_counts[PRIORITY_DMJAM]:,} charts")
+    print(f"    - osu! O2EZ Server ([O2EZ]):       {priority_counts[PRIORITY_O2EZ]:,} charts")
 
     if cross_source_diffs:
         print(f"\n  Cross-Source Duplicate Rating Offsets (Discarded vs Kept):")
@@ -451,6 +452,7 @@ def main():
     lengths = np.empty(len(unique_charts), dtype=np.int32)
     levels = np.empty(len(unique_charts), dtype=np.float32)
     durations = np.empty(len(unique_charts), dtype=np.int32)
+    priorities = np.empty(len(unique_charts), dtype=np.int32)
 
     metadata = []
     current_offset = 0
@@ -462,6 +464,7 @@ def main():
         lengths[i] = L
         levels[i] = float(c["level"])
         durations[i] = int(c["duration_ms"])
+        priorities[i] = int(c["priority"])
         current_offset += L * 7
 
         metadata.append({
@@ -488,6 +491,7 @@ def main():
         lengths=lengths,
         levels=levels,
         durations=durations,
+        priorities=priorities,
     )
     print(f"Saved packed dataset to {OUTPUT_NPZ} ({os.path.getsize(OUTPUT_NPZ) / 1048576:.2f} MB)")
 

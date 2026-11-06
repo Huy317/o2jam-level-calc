@@ -32,16 +32,15 @@ flowchart LR
 
 | Metric / Dimension | Specification / Value |
 | :--- | :--- |
-| **Total Unique Charts** | **3,997 charts** (deduplicated across Private Server, NSJAM, and DMJAM; priority `private > nsjam > dmjam`) |
-| **Level Coverage** | **Lv. 4 to Lv. 180** (mean Lv. 82.7) |
+| **Total Unique Charts** | **4,423 charts** (deduplicated across Private Server, NSJAM, DMJAM, and O2EZ; priority `private > nsjam > dmjam > o2ez`) |
+| **Level Coverage** | **Lv. 4 to Lv. 180** (mean Lv. 81.8) |
 | **Model Size** | **4.60 MB** (`model.onnx`, Dual Output: `predicted_level`, `strain_curve`) |
-| **Held-Out Validation MAE (Primary)** | **5.59 levels** ($n=600$, 15% split) |
-| **Held-Out Validation RMSE** | **8.01 levels** |
-| **Held-Out Pearson Correlation ($R$)** | **0.9774** |
-| **Held-Out Median Error (P50)** | **$\le 3.78$ levels** |
-| **Held-Out 90th Percentile (P90)** | **$\le 13.12$ levels** |
-| **Full Dataset MAE (Secondary, 85% Train)** | **4.96 levels** ($n=3,997$; RMSE 7.07, $R=0.9838$) |
-| **Full Dataset P50 / P90** | **$\le 3.44$ levels** / **$\le 11.32$ levels** |
+| **Canonical Held-Out Val MAE ($n=613$)** | **5.19 levels** (`Private + NSJAM + DMJAM`, RMSE **7.70**, $R=0.9785$) |
+| **All Held-Out Validation MAE ($n=664$)** | **5.24 levels** (15% split, RMSE **7.67**, $R=0.9772$) |
+| **Held-Out Median Error (P50)** | **$\le 3.57$ levels** (Canonical) / **$\le 3.65$ levels** (All Val) |
+| **Held-Out 90th Percentile (P90)** | **$\le 11.17$ levels** (Canonical) / **$\le 11.26$ levels** (All Val) |
+| **Full Dataset MAE (Secondary, 85% Train)** | **4.45 levels** ($n=4,423$; RMSE 6.30, $R=0.9859$) |
+| **Full Dataset P50 / P90** | **$\le 3.26$ levels** / **$\le 9.42$ levels** |
 | **Inference Latency** | **~8 - 18 ms** (WebAssembly client-side typical) |
 
 ---

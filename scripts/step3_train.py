@@ -48,13 +48,14 @@ def set_seed(seed=SEED):
 
 
 class O2JamDataset(Dataset):
-    def __init__(self, flat_grids, offsets, lengths, levels, indices, augment=False):
+    def __init__(self, flat_grids, offsets, lengths, levels, indices, augment=False, priorities=None):
         self.flat_grids = flat_grids
         self.offsets = offsets
         self.lengths = lengths
         self.levels = levels
         self.indices = indices
         self.augment = augment
+        self.priorities = priorities
 
     def __len__(self):
         return len(self.indices)
@@ -71,6 +72,8 @@ class O2JamDataset(Dataset):
             grid = np.ascontiguousarray(grid[:, ::-1])
 
         level = self.levels[chart_idx]
+        if self.priorities is not None:
+            return torch.from_numpy(grid), torch.tensor(level, dtype=torch.float32), torch.tensor(self.priorities[chart_idx], dtype=torch.long)
         return torch.from_numpy(grid), torch.tensor(level, dtype=torch.float32)
 
 
@@ -92,7 +95,11 @@ class LengthBucketSampler(torch.utils.data.Sampler):
 
 
 def collate_fn(batch):
-    grids, levels = zip(*batch)
+    has_prio = len(batch[0]) == 3
+    if has_prio:
+        grids, levels, priorities = zip(*batch)
+    else:
+        grids, levels = zip(*batch)
     lengths = [g.shape[0] for g in grids]
     max_len = max(lengths)
 
@@ -104,7 +111,38 @@ def collate_fn(batch):
         mask[i, 0, :g.shape[0]] = 1.0
 
     levels_tensor = torch.stack(levels)
+    if has_prio:
+        return padded, levels_tensor, mask, torch.stack(priorities)
     return padded, levels_tensor, mask
+
+
+class ServerCalibrationAdapter(nn.Module):
+    """
+    Train-only per-server calibration head:
+    Maps canonical Private prediction `pred` -> server-specific label scale `pred_server`
+    using a 4-knot piecewise linear offset for each non-Private server (priority > 0).
+    Priority 0 (Private) is strictly fixed at 0 offset (identity).
+    Discarded at inference / ONNX export so model.onnx predicts strictly on the canonical scale.
+    """
+    def __init__(self, num_sources=4):
+        super().__init__()
+        self.register_buffer("knots", torch.tensor([35.0, 62.5, 85.0, 115.0], dtype=torch.float32))
+        init_offsets = torch.zeros((num_sources, 4), dtype=torch.float32)
+        if num_sources > 3:
+            init_offsets[3] = torch.tensor([-4.0, -1.5, -0.15, -2.5], dtype=torch.float32)
+        self.server_offsets = nn.Parameter(init_offsets)
+
+    def forward(self, pred, priorities):
+        x = pred.unsqueeze(-1)
+        k = self.knots
+        b0 = ((k[1] - x) / (k[1] - k[0])).clamp(0.0, 1.0)
+        b1 = torch.minimum(((x - k[0]) / (k[1] - k[0])).clamp(0.0, 1.0), ((k[2] - x) / (k[2] - k[1])).clamp(0.0, 1.0))
+        b2 = torch.minimum(((x - k[1]) / (k[2] - k[1])).clamp(0.0, 1.0), ((k[3] - x) / (k[3] - k[2])).clamp(0.0, 1.0))
+        b3 = ((x - k[2]) / (k[3] - k[2])).clamp(0.0, 1.0)
+        basis = torch.cat([b0, b1, b2, b3], dim=-1)
+        offsets_per_sample = self.server_offsets[priorities]
+        is_non_private = (priorities > 0).float().unsqueeze(-1)
+        return pred + (basis * offsets_per_sample * is_non_private).sum(dim=-1)
 
 
 class ResidualBlock1D(nn.Module):
@@ -313,6 +351,7 @@ def evaluate(model, loader, device):
     with torch.no_grad():
         for x, y, mask in loader:
             x, y, mask = x.to(device), y.to(device), mask.to(device)
+
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 pred, _ = model(x, mask)
             all_preds.extend(pred.cpu().numpy().tolist())
@@ -339,6 +378,7 @@ def train():
     offsets = data["offsets"]
     lengths = data["lengths"]
     levels = data["levels"]
+    priorities = data["priorities"] if "priorities" in data else None
     n_charts = len(levels)
     print(f"Loaded dataset: {n_charts:,} charts")
 
@@ -350,7 +390,7 @@ def train():
     train_indices = [i for i in range(n_charts) if i not in val_set]
     print(f"Train set: {len(train_indices):,} charts | Validation set: {len(val_indices):,} charts")
 
-    train_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, train_indices, augment=True)
+    train_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, train_indices, augment=True, priorities=priorities)
     val_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, val_indices, augment=False)
 
     train_lengths = [lengths[i] for i in train_indices]
@@ -362,10 +402,12 @@ def train():
     val_loader = DataLoader(val_dataset, batch_sampler=val_sampler, collate_fn=collate_fn, num_workers=0, pin_memory=True)
 
     model = O2JamLevelPredictor(channels=128).to(device)
+    adapter = ServerCalibrationAdapter().to(device) if priorities is not None else None
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model Parameters: {total_params:,}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    opt_params = list(model.parameters()) + (list(adapter.parameters()) if adapter is not None else [])
+    optimizer = torch.optim.AdamW(opt_params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-5)
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
@@ -374,16 +416,23 @@ def train():
 
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
+        if adapter is not None:
+            adapter.train()
         total_loss = 0.0
         n_batches = 0
 
-        for x, y, mask in train_loader:
-            x, y, mask = x.to(device), y.to(device), mask.to(device)
+        for batch in train_loader:
+            if adapter is not None:
+                x, y, mask, prios = [b.to(device) for b in batch]
+            else:
+                x, y, mask = [b.to(device) for b in batch]
+
             optimizer.zero_grad()
 
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 pred, strain_curve = model(x, mask)
-                loss = compute_loss(pred, y, mask, strain_curve)
+                pred_for_loss = adapter(pred, prios) if adapter is not None else pred
+                loss = compute_loss(pred_for_loss, y, mask, strain_curve)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
