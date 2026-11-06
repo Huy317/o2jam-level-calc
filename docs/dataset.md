@@ -2,16 +2,16 @@
 
 ## 1. Data Sources & Composition
 
-The training dataset integrates **4,423 unique 7-key charts** across four major O2Jam server rating systems, with uncompressed native `.ojn` files taking highest priority:
+The training dataset integrates **3,997 unique 7-key charts** across three major O2Jam server rating systems, with uncompressed native `.ojn` files taking priority over `.osu` text converts:
 
 | Source | File Format | Role / Server Context | Unique Charts |
 | :--- | :--- | :--- | :---: |
 | **Private Server Native** | `.ojn` native binary | Uncorrupted master charts from community channels (`DSong`, `ESong`, `HSong`, `NSong`) | 2,367 |
-| **NSJAM Native** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,225 |
-| **osu! Converts** | `.osu` converts | osu!mania 7K conversions (405 DMJAM `[E],[N],[H],[D]`, 426 O2EZ `[O2EZ]`) | 831 |
-| **Total** | — | **Deduplicated Unified Dataset** | **4,423** |
+| **NSJAM Native** | `.ojn` native binary | Modern community grading (`NSM01` Easy, `NSM02` Normal, `NSM03` Hard, `NSM04` LN) | 1,269 |
+| **osu! DMJAM Converts** | `.osu` converts | osu!mania 7K DMJAM conversions (`[E]`, `[N]`, `[H]`, `[D]`) | 361 |
+| **Total** | — | **Deduplicated Unified Dataset** | **3,997** |
 
-Charts with level $\le 3$ or fewer than 20 notes are filtered out during parsing. The osu! converts tag split (405 DMJAM, 426 O2EZ) is tracked via the dataset priority metadata.
+Charts with level $\le 3$, fewer than 20 notes, or `[O2EZ]` tags (excluded due to systematic $-2.1$ level offset and higher rating variance) are filtered out during parsing.
 
 ### Credits
 - DMJAM & O2EZ charts provided by the [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975).
@@ -65,7 +65,7 @@ Many charts exist across multiple servers under different rating iterations. To 
    - **Title token match:** If title token sets (alphanumeric and CJK/Hangul tokens, excluding common terms like `o2jam`, `hard`, `mix`, etc.) overlap between candidates, they are marked duplicate.
    - **Fallback match:** If note count and duration match, level ratings are identical, and duration is within 0.5s ($|\Delta \text{duration}| \le 500\text{ ms}$), the charts are marked duplicate.
 2. **Duplicate collisions are resolved strictly by source authority:**
-   $$\text{Private Server Native (0)} > \text{osu! DMJAM (1)} > \text{NSJAM Native (2)} > \text{osu! O2EZ (3)}$$
+   $$\text{Private Server Native (0)} > \text{NSJAM Native (1)} > \text{osu! DMJAM (2)}$$
    Uncorrupted native `.ojn` files always take precedence over text-converted `.osu` files.
 
 ---
@@ -73,10 +73,10 @@ Many charts exist across multiple servers under different rating iterations. To 
 ## 4. Packing Format (`data/o2jam_dataset.npz`)
 
 For training efficiency, all charts are serialized into a compressed NumPy archive:
-- `flat_grids`: `uint8` 1D array storing all concatenated `(T, 7)` grids. Total size: 257,789,875 elements (~245.8 MB uncompressed in memory).
+- `flat_grids`: `uint8` 1D array storing all concatenated `(T, 7)` grids. Total size: 227,892,707 elements (~217.34 MB uncompressed in memory).
 - `offsets`: `int64` array of size $N + 1$ marking chart boundaries in `flat_grids`.
 - `lengths`: `int32` array of frame counts $T$ for each chart.
 - `levels`: `float32` target difficulty levels.
 - `durations`: `int32` song durations in milliseconds.
 
-The archive is saved via `np.savez_compressed` (occupying ~20.4 MB on disk) and loaded into memory using `np.load` (fully decompressed into RAM rather than memory-mapped).
+The archive is saved via `np.savez_compressed` (occupying ~18.02 MB on disk) and loaded into memory using `np.load` (fully decompressed into RAM rather than memory-mapped).

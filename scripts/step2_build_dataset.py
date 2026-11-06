@@ -59,11 +59,11 @@ MAX_FRAMES_CAP = 25000  # Safety cap: 500 seconds
 LEVEL_REGEX = re.compile(r"\[(\d+)\]\s*$")
 DMJAM_TAGS = {"[D]", "[H]", "[N]", "[E]"}
 
-# Priority: Native Private Server (0) > osu! DMJAM converts (1) > NSJAM (2) > O2EZ converts (3)
+# Priority: Native Private Server (0) > NSJAM Native (1) > osu! DMJAM converts (2)
 PRIORITY_PRIVATE = 0
-PRIORITY_DMJAM = 1
-PRIORITY_NSJAM = 2
-PRIORITY_O2EZ = 3
+PRIORITY_NSJAM = 1
+PRIORITY_DMJAM = 2
+
 
 
 # ── 1. .osu Beatmap Parser ──────────────────────────────────────────────────
@@ -116,7 +116,9 @@ def parse_osu_file(file_path):
     if level <= 3 or len(hit_objects) < 20:
         return None
 
-    priority = PRIORITY_DMJAM if any(tag in version_line for tag in DMJAM_TAGS) else PRIORITY_O2EZ
+    if not any(tag in version_line for tag in DMJAM_TAGS):
+        return None
+    priority = PRIORITY_DMJAM
 
     hit_objects.sort(key=lambda o: (o[0], o[1], o[2]))
     first_t = hit_objects[0][0]
@@ -394,12 +396,11 @@ def main():
 
     unique_charts = []
     discarded_duplicates = 0
-    priority_counts = {PRIORITY_PRIVATE: 0, PRIORITY_DMJAM: 0, PRIORITY_NSJAM: 0, PRIORITY_O2EZ: 0}
+    priority_counts = {PRIORITY_PRIVATE: 0, PRIORITY_NSJAM: 0, PRIORITY_DMJAM: 0}
     priority_labels = {
         PRIORITY_PRIVATE: "Private Server Native",
-        PRIORITY_DMJAM: "osu! DMJAM",
         PRIORITY_NSJAM: "NSJAM Native",
-        PRIORITY_O2EZ: "osu! O2EZ",
+        PRIORITY_DMJAM: "osu! DMJAM",
     }
     cross_source_diffs = {}
 
@@ -426,9 +427,8 @@ def main():
     print(f"  Discarded duplicates:   {discarded_duplicates:,}")
     print(f"  Source breakdown:")
     print(f"    - Private Server Native:           {priority_counts[PRIORITY_PRIVATE]:,} charts")
-    print(f"    - osu! DMJAM Server ([D],[H]...):  {priority_counts[PRIORITY_DMJAM]:,} charts")
     print(f"    - NSJAM Native Server:             {priority_counts[PRIORITY_NSJAM]:,} charts")
-    print(f"    - osu! O2EZ Server ([O2EZ]):       {priority_counts[PRIORITY_O2EZ]:,} charts")
+    print(f"    - osu! DMJAM Server ([D],[H]...):  {priority_counts[PRIORITY_DMJAM]:,} charts")
 
     if cross_source_diffs:
         print(f"\n  Cross-Source Duplicate Rating Offsets (Discarded vs Kept):")

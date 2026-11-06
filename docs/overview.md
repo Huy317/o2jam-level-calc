@@ -32,16 +32,16 @@ flowchart LR
 
 | Metric / Dimension | Specification / Value |
 | :--- | :--- |
-| **Total Unique Charts** | **4,423 charts** (deduplicated across DMJAM, NSJAM, O2EZ, and Private Servers) |
-| **Level Coverage** | **Lv. 4 to Lv. 180** (mean Lv. 81.8) |
+| **Total Unique Charts** | **3,997 charts** (deduplicated across Private Server, NSJAM, and DMJAM; priority `private > nsjam > dmjam`) |
+| **Level Coverage** | **Lv. 4 to Lv. 180** (mean Lv. 82.7) |
 | **Model Size** | **4.60 MB** (`model.onnx`, Dual Output: `predicted_level`, `strain_curve`) |
-| **Held-Out Validation MAE (Primary)** | **5.52 levels** ($n=664$, 15% split) |
-| **Held-Out Validation RMSE** | **8.14 levels** |
-| **Held-Out Pearson Correlation ($R$)** | **0.9776** |
-| **Held-Out Median Error (P50)** | **$\le 3.80$ levels** |
-| **Held-Out 90th Percentile (P90)** | **$\le 12.74$ levels** |
-| **Full Dataset MAE (Secondary, 85% Train)** | **4.69 levels** ($n=4,423$; RMSE 6.69, $R=0.9840$) |
-| **Full Dataset P50 / P90** | **$\le 3.33$ levels** / **$\le 10.38$ levels** |
+| **Held-Out Validation MAE (Primary)** | **5.59 levels** ($n=600$, 15% split) |
+| **Held-Out Validation RMSE** | **8.01 levels** |
+| **Held-Out Pearson Correlation ($R$)** | **0.9774** |
+| **Held-Out Median Error (P50)** | **$\le 3.78$ levels** |
+| **Held-Out 90th Percentile (P90)** | **$\le 13.12$ levels** |
+| **Full Dataset MAE (Secondary, 85% Train)** | **4.96 levels** ($n=3,997$; RMSE 7.07, $R=0.9838$) |
+| **Full Dataset P50 / P90** | **$\le 3.44$ levels** / **$\le 11.32$ levels** |
 | **Inference Latency** | **~8 - 18 ms** (WebAssembly client-side typical) |
 
 ---
