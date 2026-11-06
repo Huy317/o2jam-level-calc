@@ -52,6 +52,9 @@ def parse_osu_beatmap(file_path):
                     end_t = int(parts[5].split(":")[0]) if (n_type & 128 and len(parts) > 5) else t
                     hit_objects.append((t, end_t, col))
 
+    if mode != "3" or circle_size != "7":
+        return None, f"Unsupported mode/keycount: Mode={mode}, CS={circle_size} (expected 7K osu!mania Mode=3, CS=7)"
+
     if not hit_objects:
         return None, "No hit objects found."
 

@@ -12,6 +12,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATASET_PATH = os.path.join(REPO_ROOT, "data", "o2jam_dataset.npz")
 METADATA_PATH = os.path.join(REPO_ROOT, "data", "dataset_metadata.json")
 ONNX_PATH = os.path.join(REPO_ROOT, "model.onnx")
+CHECKPOINT_PATH = os.path.join(REPO_ROOT, "best_model.pt")
 
 def main():
     print("=== O2Jam 7K Level Error Analyzer (ONNX Runtime) ===")
@@ -60,8 +61,31 @@ def main():
     rmse = np.sqrt(np.mean(errors ** 2))
     r = np.corrcoef(preds, targets)[0, 1] if n_charts > 1 else 0.0
 
+    val_indices = None
+    if os.path.exists(CHECKPOINT_PATH):
+        try:
+            import torch
+            ckpt = torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=False)
+            val_indices = ckpt.get("val_indices")
+        except Exception:
+            pass
+
     print("=" * 60)
-    print(f"OVERALL PERFORMANCE ({n_charts} charts):")
+    if val_indices is not None and len(val_indices) > 0:
+        val_idx_arr = np.array(val_indices)
+        v_targets = targets[val_idx_arr]
+        v_preds = preds[val_idx_arr]
+        v_errors = np.abs(v_preds - v_targets)
+        v_mae = np.mean(v_errors)
+        v_rmse = np.sqrt(np.mean(v_errors ** 2))
+        v_r = np.corrcoef(v_preds, v_targets)[0, 1] if len(val_idx_arr) > 1 else 0.0
+        print(f"HELD-OUT VALIDATION ({len(val_idx_arr)} charts):")
+        print(f"  MAE:       {v_mae:.2f} levels")
+        print(f"  RMSE:      {v_rmse:.2f} levels")
+        print(f"  Pearson R: {v_r:.4f}")
+        print("-" * 60)
+
+    print(f"FULL DATASET PERFORMANCE ({n_charts} charts):")
     print(f"  MAE:       {mae:.2f} levels")
     print(f"  RMSE:      {rmse:.2f} levels")
     print(f"  Pearson R: {r:.4f}")
@@ -74,7 +98,7 @@ def main():
     print("\nPERFORMANCE BY LEVEL TIER:")
     print(f"{'Tier':<12} | {'Count':<5} | {'MAE':<6} | {'RMSE':<6} | {'Bias (Pred - Actual)':<20}")
     print("-" * 60)
-    buckets = [(20, 45), (45, 70), (70, 95), (95, 120), (120, 180)]
+    buckets = [(1, 20), (20, 45), (45, 70), (70, 95), (95, 120), (120, 185)]
     for lo, hi in buckets:
         mask = (targets >= lo) & (targets < hi)
         cnt = np.sum(mask)

@@ -175,9 +175,11 @@ def parse_ojn_file(file_path, folder_name, source_type="nsjam", priority=PRIORIT
             file_len = os.path.getsize(file_path)
 
             if hard_off < 300 or hard_off >= file_len:
-                hard_off = 300
-            if cover_off <= hard_off or cover_off > file_len:
+                return None
+            if cover_off > file_len:
                 cover_off = file_len
+            if cover_off <= hard_off:
+                return None
 
             f.seek(hard_off)
             
@@ -338,12 +340,15 @@ def main():
         print(f"  Found {len(osu_files)} .osu files across {len(osu_dirs)} directories.")
         
         parsed_osu = 0
+        skipped_osu = 0
         for fp in osu_files:
             c = parse_osu_file(fp)
             if c:
                 all_charts.append(c)
                 parsed_osu += 1
-        print(f"  Successfully parsed {parsed_osu} valid 7K charts from osu!.")
+            else:
+                skipped_osu += 1
+        print(f"  Successfully parsed {parsed_osu} valid 7K charts from osu! ({skipped_osu} skipped/failed).")
 
     # 2. Scan Private Server Folders (Native .ojn)
     for folder_name, folder_path in PRIVATE_SERVER_DIRS.items():
@@ -353,12 +358,15 @@ def main():
         ojn_files = [f for f in os.listdir(folder_path) if f.startswith("o2ma") and f.lower().endswith(".ojn")]
         print(f"Scanning {folder_name}: {len(ojn_files)} .ojn files...")
         parsed_priv = 0
+        skipped_priv = 0
         for fn in ojn_files:
             c = parse_ojn_file(os.path.join(folder_path, fn), folder_name, source_type="private", priority=PRIORITY_PRIVATE)
             if c:
                 all_charts.append(c)
                 parsed_priv += 1
-        print(f"  Successfully parsed {parsed_priv} valid charts from {folder_name}.")
+            else:
+                skipped_priv += 1
+        print(f"  Successfully parsed {parsed_priv} valid charts from {folder_name} ({skipped_priv} skipped/failed).")
 
     # 3. Scan NSJAM Folders (Native .ojn)
     for folder_name, folder_path in NSJAM_DIRS.items():
@@ -368,12 +376,15 @@ def main():
         ojn_files = [f for f in os.listdir(folder_path) if f.startswith("o2ma") and f.lower().endswith(".ojn")]
         print(f"Scanning {folder_name}: {len(ojn_files)} .ojn files...")
         parsed_nsjam = 0
+        skipped_nsjam = 0
         for fn in ojn_files:
             c = parse_ojn_file(os.path.join(folder_path, fn), folder_name, source_type="nsjam", priority=PRIORITY_NSJAM)
             if c:
                 all_charts.append(c)
                 parsed_nsjam += 1
-        print(f"  Successfully parsed {parsed_nsjam} valid charts from {folder_name}.")
+            else:
+                skipped_nsjam += 1
+        print(f"  Successfully parsed {parsed_nsjam} valid charts from {folder_name} ({skipped_nsjam} skipped/failed).")
 
     print(f"\nTotal candidate charts parsed across all sources: {len(all_charts):,}")
 
@@ -384,6 +395,13 @@ def main():
     unique_charts = []
     discarded_duplicates = 0
     priority_counts = {PRIORITY_PRIVATE: 0, PRIORITY_DMJAM: 0, PRIORITY_NSJAM: 0, PRIORITY_O2EZ: 0}
+    priority_labels = {
+        PRIORITY_PRIVATE: "Private Server Native",
+        PRIORITY_DMJAM: "osu! DMJAM",
+        PRIORITY_NSJAM: "NSJAM Native",
+        PRIORITY_O2EZ: "osu! O2EZ",
+    }
+    cross_source_diffs = {}
 
     by_notes = {}
     for c in all_charts:
@@ -393,6 +411,10 @@ def main():
             if are_charts_duplicate(c, existing):
                 is_dup = True
                 discarded_duplicates += 1
+                if c["priority"] != existing["priority"]:
+                    pair_key = f"{priority_labels[existing['priority']]} vs {priority_labels[c['priority']]}"
+                    diff = c["level"] - existing["level"]
+                    cross_source_diffs.setdefault(pair_key, []).append(diff)
                 break
         if not is_dup:
             candidates.append(c)
@@ -407,6 +429,17 @@ def main():
     print(f"    - osu! DMJAM Server ([D],[H]...):  {priority_counts[PRIORITY_DMJAM]:,} charts")
     print(f"    - NSJAM Native Server:             {priority_counts[PRIORITY_NSJAM]:,} charts")
     print(f"    - osu! O2EZ Server ([O2EZ]):       {priority_counts[PRIORITY_O2EZ]:,} charts")
+
+    if cross_source_diffs:
+        print(f"\n  Cross-Source Duplicate Rating Offsets (Discarded vs Kept):")
+        print(f"    {'Source Pair':<45} | {'Pairs':<6} | {'Mean |Diff|':<11} | {'Mean Signed Diff':<16}")
+        print("    " + "-" * 85)
+        for pair_key, diffs in sorted(cross_source_diffs.items()):
+            diff_arr = np.array(diffs, dtype=np.float32)
+            cnt = len(diff_arr)
+            mean_abs = np.mean(np.abs(diff_arr))
+            mean_signed = np.mean(diff_arr)
+            print(f"    {pair_key:<45} | {cnt:6d} | {mean_abs:11.2f} | {mean_signed:+16.2f}")
 
     # 4. Pack into zero-copy continuous uint8 array
     print(f"\nPacking {len(unique_charts):,} charts into zero-copy NumPy archive...")
