@@ -8,75 +8,30 @@ Includes a lightweight in-game overlay for [tosu](https://github.com/KotRikD/tos
 
 ## tosu In-Game Overlay
 
-No Python or machine learning setup required.
+1. Download `o2jam_level_predictor.zip` from [GitHub Releases](https://github.com/Huy317/o2jam-level-calc/releases) (or copy [`extension/o2jam_level_predictor`](extension/o2jam_level_predictor) from this repo) into your `tosu/static/` folder.
+2. Start **tosu** and **osu!**.
+3. Open `http://127.0.0.1:24050/o2jam_level_predictor/` in your browser or add it as an OBS browser source.
 
-### Setup
-
-1. Download `o2jam_level_predictor.zip` from [GitHub Releases](https://github.com/Huy317/o2jam-level-calc/releases) (or grab the `extension/o2jam_level_predictor` folder directly from this repo).
-2. Extract the folder into your tosu `static/` directory:
-   ```
-   tosu/
-   └── static/
-       └── o2jam_level_predictor/
-           ├── index.html
-           ├── index.js
-           ├── style.css
-           ├── model.onnx
-           ├── settings.json
-           └── ...
-   ```
-3. Start tosu and osu!.
-4. Open `http://127.0.0.1:24050/o2jam_level_predictor/` in your browser, or add it as a browser source in OBS / tosu overlay manager.
-
-### Features
-
-- **Runs 100% locally:** Inferences run inside the browser using WebAssembly ONNX Runtime (`model.onnx`). No external server or API calls.
-- **Speed & mod aware:** Automatically adjusts predictions for Double Time (1.5x DT), Half Time (0.75x HT), or custom osu! rate multipliers.
-- **Low overhead:** Only recalculates when the beatmap or mod changes, keeping CPU usage minimal during gameplay.
-- **Configurable:** Toggle decimal precision, custom accent colors, scale, opacity, and song title from the tosu settings dashboard.
+- **Runs 100% locally:** Evaluates charts in the browser via WebAssembly ONNX Runtime (`model.onnx`) in ~8–18 ms.
+- **Rate aware:** Automatically scales note timings for Double Time (1.5x DT), Half Time (0.75x HT), or custom osu! rates.
+- **Configurable:** Customize decimal precision, accent colors, scale, opacity, and song title in the tosu settings dashboard.
 
 ---
 
 ## CLI Usage
-
-You can also test local `.osu` charts from the command line:
 
 ```bash
 pip install -r requirements.txt
 python scripts/predict.py "path/to/chart.osu"
 ```
 
-Example output:
-
-```text
-=========================================
-  Song Title : xi - FREEDOM DiVE
-  Difficulty : [FOUR DIMENSIONS]
-  Key Count  : 7K (Mode 3)
-  Notes      : 4,218 notes
-  Duration   : 254.2s (12,710 frames)
------------------------------------------
-  >>> Predicted O2Jam Level : Lv. 138.4 (Round: Lv. 138) <<<
-  Inference Latency         : 8.50 ms
-=========================================
-```
-
 ---
 
-## How It Works
+## How It Works & Benchmarks
 
-Standard rhythm game star rating algorithms often struggle to capture O2Jam difficulty curves because O2Jam charts rely heavily on long-note density, asymmetric chord jacks, and prolonged stamina drain.
+Each chart is quantized into a 20ms `(T, 7)` note grid (taps, hold heads, hold bodies, and releases) and passed through 60 domain-engineered kinematic channels, a 6-block dilated 1D ResNet (~10.1s receptive field), multi-scale phrase pooling, and a bounded Double-Softplus regression head (`[1.0, 195.0]`).
 
-This model learns directly from raw chart structure:
-
-1. **Note Grid Input:** The chart is converted into a discrete 20ms time-grid across all 7 columns, distinguishing taps, hold heads, hold bodies, and releases.
-2. **Dilated CNN Backbone:** 1D dilated residual convolutions extract pattern density, chord transitions, and repetitive jack strain across a wide receptive field (~10.1 seconds / 505 frames).
-3. **Multi-Scale Pooling & Gating:** Combines sustain-damped 2s burst pooling, 5s phrase density, 15s climax pooling, and peak-relative active stamina gating into a bounded linear-core Double-Softplus rating (`[1.0, 195.0]`).
-4. **Clean Multi-Server Dataset & Calibration:** Evaluated across 4,423 deduplicated O2Jam charts (`private > nsjam > dmjam > o2ez`), using a train-only `ServerCalibrationAdapter` to absorb legacy server grading offsets while exporting a zero-overhead canonical predictor.
-
-### Benchmark Summary
-
-The primary benchmark is evaluated on the held-out validation split (15%, $n=664$ total / $n=613$ canonical `Private+NSJAM+DMJAM` charts, unseen during training). Full-dataset metrics ($n=4,423$, which include the 85% training set) are provided as secondary reference.
+During training, a piecewise-linear `ServerCalibrationAdapter` absorbs legacy server grading offsets (`O2EZ`) so the exported `model.onnx` predicts strictly on the canonical modern O2Jam scale.
 
 | Metric | Canonical Held-Out Val ($n=613$) | All Held-Out Val ($n=664$) | Full Dataset ($n=4,423$, 85% Train) |
 | :--- | :---: | :---: | :---: |
@@ -86,42 +41,12 @@ The primary benchmark is evaluated on the held-out validation split (15%, $n=664
 | **Median Absolute Error (P50)** | **$\le 3.57$ levels** | **$\le 3.65$ levels** | $\le 3.26$ levels |
 | **90th Percentile Error (P90)** | **$\le 11.17$ levels** | **$\le 11.26$ levels** | $\le 9.42$ levels |
 
-Comprehensive validation tables, tier breakdowns, and duration analysis are documented in [`docs/benchmarks.md`](docs/benchmarks.md).
-
----
-
-## Repository Structure
-
-```
-o2jam-level-calc/
-├── docs/                      # Technical documentation & benchmarks
-│   ├── overview.md            # System architecture and data pipeline
-│   ├── architecture.md        # Neural network layers and strain channels
-│   ├── dataset.md             # Data sources, binary .ojn parsing & deduplication
-│   ├── benchmarks.md          # Benchmark results and error breakdowns
-│   └── extension.md           # Tosu overlay installation and configuration
-├── scripts/                   # Training and analysis scripts
-│   ├── step1_inspect.py       # Scans and validates input charts
-│   ├── step2_build_dataset.py # Generates numpy arrays from .osu and .ojn
-│   ├── step3_train.py         # PyTorch training and ONNX export
-│   ├── predict.py             # CLI single-chart predictor
-│   ├── analyze_errors.py      # PyTorch held-out validation error analysis
-│   └── analyze_errors_onnx.py # Full ONNX benchmark suite
-├── extension/                 # Standalone tosu static overlay
-│   └── o2jam_level_predictor/ # Ready to drop into tosu/static/
-├── model.onnx                 # Production ONNX model
-└── requirements.txt
-```
-
----
-
-## Documentation
-
-- [Overview & Pipeline](docs/overview.md)
-- [Model Architecture](docs/architecture.md)
-- [Dataset & Deduplication](docs/dataset.md)
-- [Benchmarks & Error Analysis](docs/benchmarks.md)
-- [Tosu Extension](docs/extension.md)
+### Documentation
+- [Overview & Pipeline](docs/overview.md) — System workflow and training scripts (`scripts/step1_inspect.py`, `step2_build_dataset.py`, `step3_train.py`)
+- [Model Architecture](docs/architecture.md) — Kinematic channels, dilated ResNet, pooling, and server calibration
+- [Dataset & Deduplication](docs/dataset.md) — `.ojn` binary parsing, source priority (`private > nsjam > dmjam > o2ez`), and adding new servers
+- [Benchmarks & Error Analysis](docs/benchmarks.md) — Tier breakdowns, duration analysis, and historical model comparisons
+- [tosu Extension](docs/extension.md) — Overlay setup, rate scaling, and settings reference
 
 ---
 
@@ -135,14 +60,6 @@ o2jam-level-calc/
 
 ---
 
-## License
+## License & Acknowledgments
 
-MIT
-
----
-
-## Acknowledgments
-
-- [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975) for community chart archives.
-- [o2jam-to-osu](https://github.com/LuzianU/o2jam-to-osu) for `.ojn` binary format reference.
-- [tosu](https://github.com/KotRikD/tosu) for the memory reading and overlay platform.
+MIT License. Special thanks to the [O2Jam osu!mania 7K Conversion Project](https://osu.ppy.sh/community/forums/topics/1831975), [o2jam-to-osu](https://github.com/LuzianU/o2jam-to-osu) for `.ojn` binary format reference, and [tosu](https://github.com/KotRikD/tosu).
