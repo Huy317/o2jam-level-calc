@@ -80,10 +80,10 @@ Total receptive field per frame is **505 frames $\approx 10.1$ seconds** ($1 + 8
 Difficulty cannot be evaluated purely by local density spikes or whole-song global averages. The pooling stage extracts temporal features across multiple scales while suppressing isolated gimmicks and quiet sections:
 
 ### 1. Multi-Scale Windowed Averages:
-Temporal average pooling is evaluated across three window sizes:
-- `p2`: kernel 100 frames (2.0s), stride 25 frames (0.5s), padding 50 frames (1.0s), max over time $\rightarrow (B, 128)$.
-- `p5`: kernel 250 frames (5.0s), stride 25 frames (0.5s), padding 125 frames (2.5s), max over time $\rightarrow (B, 128)$.
-- `p15`: kernel 750 frames (15.0s), stride 50 frames (1.0s), padding 375 frames (7.5s), max over time $\rightarrow (B, 128)$.
+Temporal average pooling is evaluated across three window sizes over masked features (`feat_masked = feat * mask`), normalized by the pooled mask coverage (`m = avg_pool1d(mask)`), and masked with `-1e4` where `m < 1e-3` prior to `.amax(dim=-1)` so negative `GELU` activations in valid frames are never overwritten by zero-padded windows:
+- `p2`: kernel 100 frames (2.0s), stride 25 frames (0.5s), padding 50 frames (1.0s), masked max over time $\rightarrow (B, 128)$.
+- `p5`: kernel 250 frames (5.0s), stride 25 frames (0.5s), padding 125 frames (2.5s), masked max over time $\rightarrow (B, 128)$.
+- `p15`: kernel 750 frames (15.0s), stride 50 frames (1.0s), padding 375 frames (7.5s), masked max over time $\rightarrow (B, 128)$.
 
 Burst excess is damped using the surrounding 5s phrase context:
 $$\text{excess} = \text{ReLU}(p_2 - p_5)$$

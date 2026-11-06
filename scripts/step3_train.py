@@ -221,11 +221,19 @@ class O2JamLevelPredictor(nn.Module):
         feat = self.block5(feat)
         feat = self.block6(feat)
 
-        # Masked multi-scale phrase pooling
+        # Masked multi-scale phrase pooling (mask padded windows before amax so negative GELU activations aren't clamped to 0)
         feat_masked = feat * mask
-        p2 = F.avg_pool1d(feat_masked, kernel_size=100, stride=25, padding=50).amax(dim=-1)
-        p5 = F.avg_pool1d(feat_masked, kernel_size=250, stride=25, padding=125).amax(dim=-1)
-        p15 = F.avg_pool1d(feat_masked, kernel_size=750, stride=50, padding=375).amax(dim=-1)
+        p2_raw = F.avg_pool1d(feat_masked, kernel_size=100, stride=25, padding=50)
+        m2 = F.avg_pool1d(mask, kernel_size=100, stride=25, padding=50)
+        p2 = (p2_raw + (m2 < 1e-3).float() * -1e4).amax(dim=-1)
+
+        p5_raw = F.avg_pool1d(feat_masked, kernel_size=250, stride=25, padding=125)
+        m5 = F.avg_pool1d(mask, kernel_size=250, stride=25, padding=125)
+        p5 = (p5_raw + (m5 < 1e-3).float() * -1e4).amax(dim=-1)
+
+        p15_raw = F.avg_pool1d(feat_masked, kernel_size=750, stride=50, padding=375)
+        m15 = F.avg_pool1d(mask, kernel_size=750, stride=50, padding=375)
+        p15 = (p15_raw + (m15 < 1e-3).float() * -1e4).amax(dim=-1)
 
         # Sustain-damped 2s burst: captures genuine bursts, suppresses isolated gimmick spikes
         burst_excess = F.relu(p2 - p5)
@@ -337,8 +345,9 @@ def train():
     indices = list(range(n_charts))
     random.shuffle(indices)
     split_idx = int(n_charts * (1.0 - VAL_SPLIT))
-    train_indices = indices[:split_idx]
     val_indices = indices[split_idx:]
+    val_set = set(val_indices)
+    train_indices = [i for i in range(n_charts) if i not in val_set]
     print(f"Train set: {len(train_indices):,} charts | Validation set: {len(val_indices):,} charts")
 
     train_dataset = O2JamDataset(flat_grids, offsets, lengths, levels, train_indices, augment=True)

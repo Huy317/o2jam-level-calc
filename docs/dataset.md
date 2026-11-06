@@ -50,10 +50,7 @@ Rather than converting `.ojn` to `.osu` text files (which introduces floating-po
     - `3`: Long Note (LN) hold tail
 
 ### Hard Difficulty Isolation:
-The `.ojn` container encapsulates Easy, Normal, and Hard charts sequentially in one binary file. The parser seeks strictly to `hard_offset = struct.unpack('<i', h[292:296])[0]` and reads up to `cover_off = struct.unpack('<i', h[296:300])[0]`.
-
-> [!WARNING]
-> **Known Issue:** If the Hard seek pointer is invalid (`hard_off < 300` or `hard_off >= file_len`), the parser currently falls back to `hard_off = 300` (the beginning of the file's note data). This causes Easy, Normal, and Hard notes to be merged together into a single corrupted chart. This fallback is a known bug to be addressed by rejecting invalid files.
+The `.ojn` container encapsulates Easy, Normal, and Hard charts sequentially in one binary file. The parser seeks strictly to `hard_offset = struct.unpack('<i', h[292:296])[0]` and reads up to `cover_off = struct.unpack('<i', h[296:300])[0]`. Files with invalid pointers (`hard_off < 300`, `hard_off >= file_len`, or `cover_off <= hard_off`) are rejected and logged in the per-source skip summary.
 
 Hold notes are paired by matching opening `0x02` events with their succeeding `0x03` event on the same lane, directly outputting start and release timestamps in milliseconds.
 

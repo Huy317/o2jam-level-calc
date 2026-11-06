@@ -80,11 +80,11 @@ The primary benchmark is evaluated on the held-out validation split (15%, $n=664
 
 | Metric | Held-Out Validation ($n=664$) | Full Dataset ($n=4,423$, 85% Train) |
 | :--- | :---: | :---: |
-| **Mean Absolute Error (MAE)** | **5.86 levels** | 5.26 levels |
-| **Root Mean Squared Error (RMSE)** | **8.34 levels** | 7.48 levels |
-| **Pearson Correlation ($R$)** | **0.9765** | 0.9800 |
-| **Median Absolute Error (P50)** | **$\le 4.17$ levels** | $\le 3.72$ levels |
-| **90th Percentile Error (P90)** | **$\le 13.00$ levels** | $\le 11.62$ levels |
+| **Mean Absolute Error (MAE)** | **5.52 levels** | 4.69 levels |
+| **Root Mean Squared Error (RMSE)** | **8.14 levels** | 6.69 levels |
+| **Pearson Correlation ($R$)** | **0.9776** | 0.9840 |
+| **Median Absolute Error (P50)** | **$\le 3.80$ levels** | $\le 3.33$ levels |
+| **90th Percentile Error (P90)** | **$\le 12.74$ levels** | $\le 10.38$ levels |
 
 Comprehensive validation tables, tier breakdowns, and duration analysis are documented in [`docs/benchmarks.md`](docs/benchmarks.md).
 
@@ -105,7 +105,7 @@ o2jam-level-calc/
 │   ├── step2_build_dataset.py # Generates numpy arrays from .osu and .ojn
 │   ├── step3_train.py         # PyTorch training and ONNX export
 │   ├── predict.py             # CLI single-chart predictor
-│   ├── analyze_errors.py      # PyTorch error analysis (currently broken)
+│   ├── analyze_errors.py      # PyTorch held-out validation error analysis
 │   └── analyze_errors_onnx.py # Full ONNX benchmark suite
 ├── extension/                 # Standalone tosu static overlay
 │   └── o2jam_level_predictor/ # Ready to drop into tosu/static/
